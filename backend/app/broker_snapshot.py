@@ -1,422 +1,338 @@
-import asyncio
+"""BrokerSnapshot.com scraper for New Ventures data.
+Fetches newly-added carrier data from BrokerSnapshot by date,
+downloads the CSV export, parses it, and returns structured records.
+Uses curl_cffi with Chrome TLS impersonation to bypass anti-bot detection.
+"""
+import os
 import csv
 import io
-import os
-import random
+import re
+import asyncio
 import time
-from functools import partial
-
+import random
+from typing import Optional
 from curl_cffi import requests as curl_requests
-
-# ── credentials ────────────────────────────────────────────────────────────
+# ── Configuration (from environment) ─────────────────────────────────────────
 BS_EMAIL = os.getenv("BROKER_SNAPSHOT_EMAIL", "")
 BS_PASSWORD = os.getenv("BROKER_SNAPSHOT_PASSWORD", "")
-
+BS_PROXIES = os.getenv("BROKER_SNAPSHOT_PROXIES", "")  # comma-separated host:port
+BS_PROXY_USER = os.getenv("BROKER_SNAPSHOT_PROXY_USER", "")
+BS_PROXY_PASS = os.getenv("BROKER_SNAPSHOT_PROXY_PASS", "")
 BASE_URL = "https://brokersnapshot.com"
-
-# ── proxy configuration ───────────────────────────────────────────────────
-# Comma-separated list of proxy host:port pairs
-# e.g. "31.59.20.176:6754,23.95.150.145:6114,198.23.239.134:6540"
-PROXY_LIST_RAW = os.getenv("BROKER_SNAPSHOT_PROXY_LIST", "")
-PROXY_USER = os.getenv("BROKER_SNAPSHOT_PROXY_USER", "")
-PROXY_PASS = os.getenv("BROKER_SNAPSHOT_PROXY_PASS", "")
-
-PROXY_HOSTS: list[str] = [
-    h.strip() for h in PROXY_LIST_RAW.split(",") if h.strip()
-]
-
-# Max number of proxy rotation attempts before giving up
-MAX_PROXY_RETRIES = int(os.getenv("BROKER_SNAPSHOT_MAX_RETRIES", "5"))
-
-
-def _get_proxy_url(host: str) -> str:
-    """Return a proxy URL string for a specific host."""
-    return f"http://{PROXY_USER}:{PROXY_PASS}@{host}"
-
-
-def _create_session(proxy_host: str | None = None) -> curl_requests.Session:
-    """Create a curl_cffi session that impersonates Chrome, optionally with a proxy."""
-    session = curl_requests.Session(impersonate="chrome")
-    if proxy_host:
-        proxy_url = _get_proxy_url(proxy_host)
-        session.proxies = {"http": proxy_url, "https": proxy_url}
-    return session
-
-
-# ── column-name mapping from CSV headers to DB fields ──────────────────────
-# BrokerSnapshot exports use lowercase snake_case headers (e.g. dot_number,
-# name, phy_phone).  We also keep the human-readable variants so the parser
-# works regardless of which format the site returns.
-_CSV_TO_DB: dict[str, str] = {
-    # ── DOT / MC ──
-    "DOT Number": "dot_number",
+# ── CSV column → DB field mapping ────────────────────────────────────────────
+# BrokerSnapshot CSV columns vary but typically include these.
+# We normalise them to snake_case DB column names.
+_COLUMN_MAP: dict[str, str] = {
+    "DOT#": "dot_number",
+    "DOT #": "dot_number",
+    "USDOT": "dot_number",
     "USDOT Number": "dot_number",
-    "DOT": "dot_number",
-    "dot_number": "dot_number",
-    "MC/MX Number": "mc_number",
+    "USDOT#": "dot_number",
+    "MC#": "mc_number",
+    "MC #": "mc_number",
+    "MC/MX#": "mc_number",
+    "MC/MX #": "mc_number",
     "MC Number": "mc_number",
-    "MC/MX/FF Number(s)": "mc_number",
-    "docket_number": "mc_number",
-    # ── names ──
-    "Legal Name": "company_name",
-    "Company Name": "company_name",
-    "name": "company_name",
+    "Legal Name": "legal_name",
+    "Company Name": "legal_name",
     "DBA Name": "dba_name",
-    "name_dba": "dba_name",
-    # ── entity / status ──
+    "DBA": "dba_name",
     "Entity Type": "entity_type",
-    "Operating Status": "operating_status",
-    "OperatingStatus": "operating_status",
-    # ── addresses ──
-    "Physical Address": "physical_address",
-    "phy_str": "physical_address",
-    "Mailing Address": "mailing_address",
-    "mai_str": "mailing_address",
-    "State": "state",
-    "phy_st": "state",
-    "phy_city": "physical_city",
-    "phy_zip": "physical_zip",
-    "phy_country": "physical_country",
-    "mai_city": "mailing_city",
-    "mai_st": "mailing_state",
-    "mai_zip": "mailing_zip",
-    "mai_country": "mailing_country",
-    # ── contact ──
-    "Phone": "phone",
-    "phy_phone": "phone",
+    "Operating Status": "status",
+    "Status": "status",
     "Email": "email",
-    "email_address": "email",
-    "cell_phone": "cell_phone",
-    "phy_fax": "fax",
-    # ── officers ──
-    "company_officer_1": "company_officer_1",
-    "company_officer_2": "company_officer_2",
-    # ── dates ──
-    "Added Date": "added_date",
-    "add_date": "added_date",
-    "MCS-150 Date": "mcs150_date",
-    "mcs150_date": "mcs150_date",
-    "MCS-150 Mileage": "mcs150_mileage",
-    "mcs150_mileage": "mcs150_mileage",
-    "MCS-150 Mileage (Year)": "mcs150_mileage_year",
-    "MCS150 Mileage Year": "mcs150_mileage_year",
-    "mcs150_mileage_year": "mcs150_mileage_year",
-    # ── hazmat / safety ──
-    "Hazmat Indicator": "hazmat_indicator",
-    "Hazmat": "hazmat_indicator",
-    "hm_ind": "hazmat_indicator",
-    "Safety Rating Type": "safety_rating_type",
-    "safety_rating": "safety_rating_type",
-    "Safety Rating Date": "safety_rating_date",
-    "Safety Rating Effective Date": "safety_rating_date",
-    "safety_rating_date": "safety_rating_date",
-    "Safety Review Type": "safety_review_type",
-    "Latest Review Type": "safety_review_type",
-    "review_type": "safety_review_type",
-    "Safety Review Date": "safety_review_date",
-    "Latest Review Date": "safety_review_date",
-    "review_date": "safety_review_date",
-    # ── drivers ──
-    "Interstate Within 100 Miles": "interstate_within_100",
-    "inter_within_100": "interstate_within_100",
-    "Interstate Beyond 100 Miles": "interstate_beyond_100",
-    "inter_beyond_100": "interstate_beyond_100",
-    "Interstate Total": "interstate_total",
-    "total_inter_drivers": "interstate_total",
-    "Intrastate Within 100 Miles": "intrastate_within_100",
-    "intra_within_100": "intrastate_within_100",
-    "Intrastate Beyond 100 Miles": "intrastate_beyond_100",
-    "intra_beyond_100": "intrastate_beyond_100",
-    "Intrastate Total": "intrastate_total",
-    "total_intra_drivers": "intrastate_total",
-    "Avg Trip Leased Drivers/Month": "avg_trip_leased_drivers",
-    "Avg Number Trip Leased Drivers / Month": "avg_trip_leased_drivers",
-    "avg_tld": "avg_trip_leased_drivers",
-    "Grand Total Drivers": "grand_total_drivers",
-    "Grand Total (Interstate and Intrastate)": "grand_total_drivers",
-    "total_drivers": "grand_total_drivers",
-    "Total CDL": "total_cdl",
-    "Total with CDL": "total_cdl",
-    "total_cdl": "total_cdl",
-    # ── fleet ──
-    "Total Trucks": "total_trucks",
-    "Total Number of Trucks": "total_trucks",
-    "total_trucks": "total_trucks",
-    "Total Power Units": "total_power_units",
-    "Total Number of Power Units": "total_power_units",
-    "total_pwr": "total_power_units",
-    "Fleet Size Code": "fleet_size_code",
-    "fleetsize": "fleet_size_code",
-    "Owned Truck": "owned_truck",
-    "owntruck": "owned_truck",
-    "Term Leased Truck": "term_leased_truck",
-    "trmtruck": "term_leased_truck",
-    "Trip Leased Truck": "trip_leased_truck",
-    "trptruck": "trip_leased_truck",
-    "Owned Tractor": "owned_tractor",
-    "owntract": "owned_tractor",
-    "Term Leased Tractor": "term_leased_tractor",
-    "trmtract": "term_leased_tractor",
-    "Trip Leased Tractor": "trip_leased_tractor",
-    "trptract": "trip_leased_tractor",
-    "Owned Trailer": "owned_trailer",
-    "owntrail": "owned_trailer",
-    "Term Leased Trailer": "term_leased_trailer",
-    "trmtrail": "term_leased_trailer",
-    "Trip Leased Trailer": "trip_leased_trailer",
-    "trptrail": "trip_leased_trailer",
-    # ── accident rates ──
-    "Recordable Accident Rate": "recordable_accident_rate",
-    "recordable_crash_rate": "recordable_accident_rate",
-    "Preventable Recordable Accident Rate": "preventable_accident_rate",
-    "Preventable Accident Rate": "preventable_accident_rate",
-    # ── operation / cargo ──
-    "Operation Classification": "operation_classification",
-    "Carrier Operation": "carrier_operation",
-    "carrier_operation": "carrier_operation",
+    "Phone": "phone",
+    "Phone Number": "phone",
+    "Physical Address": "physical_address",
+    "Mailing Address": "mailing_address",
+    "Power Units": "power_units",
+    "Drivers": "drivers",
+    "Total Drivers": "drivers",
     "Cargo Carried": "cargo_carried",
     "Cargo Transported": "cargo_carried",
-    # ── authority status columns ──
-    "status_code": "status_code",
-    "carship": "carship",
-    "broker_stat": "broker_stat",
-    "common_stat": "common_stat",
-    "contract_stat": "contract_stat",
-    # ── insurance requirements ──
-    "bipd_req": "bipd_required",
-    "cargo_req": "cargo_required",
-    "bond_req": "bond_required",
-    "bipd_file": "bipd_filed",
-    "cargo_file": "cargo_filed",
-    "bond_file": "bond_filed",
+    "Hazmat": "hazmat_indicator",
+    "Hazmat Indicator": "hazmat_indicator",
+    "HM Indicator": "hazmat_indicator",
+    "Operation Classification": "operation_classification",
+    "Op. Classification": "operation_classification",
+    "Carrier Operation": "carrier_operation",
+    "Safety Rating": "safety_rating",
+    "Safety Rating Type Code": "safety_rating_type_code",
+    "Safety Type Code": "safety_rating_type_code",
+    "Safety Rating Date": "safety_rating_effective_date",
+    "Safety Effective Date": "safety_rating_effective_date",
+    "Latest Review Type": "safety_rating_latest_review_type",
+    "Latest Review Date": "safety_rating_latest_review_date",
+    "MCSIP Step": "mcsip_step_number",
+    "MCSIP Step Number": "mcsip_step_number",
+    "Interstate Within 100 Miles": "interstate_within_100",
+    "Interstate Beyond 100 Miles": "interstate_beyond_100",
+    "Interstate Total": "interstate_total",
+    "Intrastate Within 100 Miles": "intrastate_within_100",
+    "Intrastate Beyond 100 Miles": "intrastate_beyond_100",
+    "Intrastate Total": "intrastate_total",
+    "Avg Trip Leased Drivers": "avg_trip_leased_drivers",
+    "Grand Total": "grand_total_drivers",
+    "Grand Total Drivers": "grand_total_drivers",
+    "Grand Total (Interstate and Intrastate)": "grand_total_drivers",
+    "Total CDL": "total_cdl",
+    "Total with CDL": "total_cdl",
+    "Total Non-CDL": "total_non_cdl",
+    "Total with Non-CDL": "total_non_cdl",
+    "Total Trucks": "total_trucks",
+    "Total Number of Trucks": "total_trucks",
+    "Total Power Units": "total_power_units",
+    "Total Number of Power Units": "total_power_units",
+    "Fleet Size Code": "fleet_size_code",
+    "Fleet Size": "fleet_size_code",
+    "Owned Truck": "owned_trucks",
+    "Owned Trucks": "owned_trucks",
+    "Term Leased Truck": "term_leased_trucks",
+    "Term Leased Trucks": "term_leased_trucks",
+    "Trip Leased Truck": "trip_leased_trucks",
+    "Trip Leased Trucks": "trip_leased_trucks",
+    "Owned Tractor": "owned_tractors",
+    "Owned Tractors": "owned_tractors",
+    "Term Leased Tractor": "term_leased_tractors",
+    "Term Leased Tractors": "term_leased_tractors",
+    "Trip Leased Tractor": "trip_leased_tractors",
+    "Trip Leased Tractors": "trip_leased_tractors",
+    "Owned Trailer": "owned_trailers",
+    "Owned Trailers": "owned_trailers",
+    "Term Leased Trailer": "term_leased_trailers",
+    "Term Leased Trailers": "term_leased_trailers",
+    "Trip Leased Trailer": "trip_leased_trailers",
+    "Trip Leased Trailers": "trip_leased_trailers",
+    "Recordable Accident Rate": "recordable_accident_rate",
+    "Preventable Recordable Accident Rate": "preventable_accident_rate",
+    "MCS-150 Mileage": "mcs150_mileage",
+    "MCS-150 Mileage (Year)": "mcs150_mileage_year",
+    "MCS-150 Mileage Year": "mcs150_mileage_year",
+    "MCS-150 Date": "mcs150_date",
+    "MCS-150 date": "mcs150_date",
+    "MCS-150 Form Date": "mcs150_date",
+    "Added Date": "date_added",
+    "Date Added": "date_added",
+    "State Carrier ID": "state_carrier_id",
+    "DUNS Number": "duns_number",
+    "Out of Service Date": "out_of_service_date",
 }
-
-# Fields that are stored as TEXT[] in Postgres
-_ARRAY_FIELDS = {"operation_classification", "carrier_operation", "cargo_carried"}
-
-# Fields that are boolean
-_BOOL_FIELDS = {"hazmat_indicator"}
-
-
-def _normalise_value(db_field: str, raw: str) -> object:
-    """Convert a raw CSV string to the correct Python type for *db_field*."""
-    val = raw.strip() if raw else ""
-    if not val or val in ("-", "--", "N/A", "n/a"):
-        if db_field in _ARRAY_FIELDS:
-            return []
-        if db_field in _BOOL_FIELDS:
-            return False
+# All valid DB columns for new_ventures (used to filter unknown CSV columns)
+_VALID_COLUMNS = {
+    "dot_number", "mc_number", "legal_name", "dba_name", "entity_type",
+    "status", "email", "phone", "physical_address", "mailing_address",
+    "power_units", "drivers", "cargo_carried", "hazmat_indicator",
+    "operation_classification", "carrier_operation", "safety_rating",
+    "safety_rating_type_code", "safety_rating_effective_date",
+    "safety_rating_latest_review_type", "safety_rating_latest_review_date",
+    "mcsip_step_number", "interstate_within_100", "interstate_beyond_100",
+    "interstate_total", "intrastate_within_100", "intrastate_beyond_100",
+    "intrastate_total", "avg_trip_leased_drivers", "grand_total_drivers",
+    "total_cdl", "total_non_cdl", "total_trucks", "total_power_units",
+    "fleet_size_code", "owned_trucks", "term_leased_trucks", "trip_leased_trucks",
+    "owned_tractors", "term_leased_tractors", "trip_leased_tractors",
+    "owned_trailers", "term_leased_trailers", "trip_leased_trailers",
+    "recordable_accident_rate", "preventable_accident_rate",
+    "mcs150_mileage", "mcs150_mileage_year", "mcs150_date",
+    "date_added", "state_carrier_id", "duns_number", "out_of_service_date",
+}
+def _get_proxy_url() -> Optional[str]:
+    """Build a random proxy URL from environment config, or None."""
+    if not BS_PROXIES or not BS_PROXY_USER:
+        return None
+    hosts = [h.strip() for h in BS_PROXIES.split(",") if h.strip()]
+    if not hosts:
+        return None
+    host = random.choice(hosts)
+    return f"http://{BS_PROXY_USER}:{BS_PROXY_PASS}@{host}"
+def _normalise_column(raw: str) -> Optional[str]:
+    """Map a raw CSV header to a DB column name."""
+    stripped = raw.strip()
+    if stripped in _COLUMN_MAP:
+        return _COLUMN_MAP[stripped]
+    # Try case-insensitive match
+    for key, val in _COLUMN_MAP.items():
+        if key.lower() == stripped.lower():
+            return val
+    return None
+def _clean_val(val: str) -> str:
+    """Strip whitespace and dash placeholders."""
+    v = val.strip()
+    if v in ("─", "-", "—", "N/A", "n/a", ""):
         return ""
-
-    if db_field in _ARRAY_FIELDS:
-        # CSV may use pipe, comma, or semicolon
-        for sep in ("|", ";"):
-            if sep in val:
-                return [s.strip() for s in val.split(sep) if s.strip()]
-        return [val]
-
-    if db_field in _BOOL_FIELDS:
-        return val.lower() in ("yes", "true", "1", "y")
-
-    return val
-
-
-def _parse_csv(csv_bytes: bytes, added_date: str) -> list[dict]:
-    """Parse downloaded CSV bytes into a list of DB-ready dicts."""
-    text = csv_bytes.decode("utf-8-sig", errors="replace")
+    return v
+def parse_csv(csv_bytes: bytes, added_date: str) -> list[dict]:
+    """Parse a BrokerSnapshot CSV export into a list of record dicts."""
+    text = csv_bytes.decode("utf-8", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
-
+    if reader.fieldnames is None:
+        return []
+    # Build column mapping for this specific CSV
+    col_map: dict[str, str] = {}
+    for raw_col in reader.fieldnames:
+        db_col = _normalise_column(raw_col)
+        if db_col and db_col in _VALID_COLUMNS:
+            col_map[raw_col] = db_col
     records: list[dict] = []
     for row in reader:
-        record: dict = {}
-        for csv_col, db_field in _CSV_TO_DB.items():
-            if csv_col in row:
-                record[db_field] = _normalise_value(db_field, row[csv_col])
-
-        # Ensure dot_number is present (required)
+        record: dict[str, str] = {}
+        for csv_col, db_col in col_map.items():
+            record[db_col] = _clean_val(row.get(csv_col, ""))
+        # Ensure date_added is set
+        if not record.get("date_added"):
+            record["date_added"] = added_date
+        # Skip rows without a DOT number (invalid)
         if not record.get("dot_number"):
             continue
-
-        # Default company_name if missing
-        if not record.get("company_name"):
-            record["company_name"] = "Unknown"
-
-        # Ensure array fields exist
-        for af in _ARRAY_FIELDS:
-            if af not in record:
-                record[af] = []
-
-        # Ensure bool fields exist
-        for bf in _BOOL_FIELDS:
-            if bf not in record:
-                record[bf] = False
-
-        # Tag with the requested added_date if not already set
-        if not record.get("added_date"):
-            record["added_date"] = added_date
-
         records.append(record)
-
     return records
-
-
-# ── login with proxy rotation ─────────────────────────────────────────────
-
-def _try_login(session: curl_requests.Session) -> tuple[bool, str]:
-    """Attempt to log in to BrokerSnapshot. Returns (success, error_msg)."""
-    try:
-        login_page = session.get(f"{BASE_URL}/LogIn", timeout=30)
-        print(f"[BrokerSnapshot] Login page status: {login_page.status_code}, length: {len(login_page.text)}")
-
-        if login_page.status_code == 403:
-            return False, f"Login page blocked by Cloudflare (403)"
-
-        login_resp = session.post(
-            f"{BASE_URL}/LogIn",
-            data={
-                "email": BS_EMAIL,
-                "password": BS_PASSWORD,
-                "ReturnUrl": "",
-            },
-            allow_redirects=True,
-            timeout=30,
-        )
-
-        if login_resp.status_code == 403:
-            return False, f"Login POST blocked by Cloudflare (403)"
-
-        if "LogOff" in login_resp.text:
-            return True, ""
-
-        snippet = login_resp.text[:300] if login_resp.text else "(empty)"
-        return False, f"Login failed. Status: {login_resp.status_code}, URL: {login_resp.url}, Body preview: {snippet}"
-
-    except Exception as exc:
-        return False, f"Login exception: {exc}"
-
-
-def _login_with_retry() -> tuple[curl_requests.Session | None, str]:
-    """Try logging in with different proxies until one works.
-    Returns (session, error_msg). session is None on total failure.
-    """
-    if not PROXY_HOSTS or not PROXY_USER or not PROXY_PASS:
-        # No proxies configured — try direct connection
-        print("[BrokerSnapshot] WARNING: No proxy configured, using direct connection")
-        session = _create_session()
-        ok, err = _try_login(session)
-        if ok:
-            return session, ""
-        return None, err
-
-    # Shuffle proxies and try each one
-    hosts = list(PROXY_HOSTS)
-    random.shuffle(hosts)
-    retries = min(MAX_PROXY_RETRIES, len(hosts))
-    errors: list[str] = []
-
-    for i in range(retries):
-        proxy_host = hosts[i]
-        print(f"[BrokerSnapshot] Attempt {i+1}/{retries} with proxy: {proxy_host}")
-
-        session = _create_session(proxy_host)
-        ok, err = _try_login(session)
-
-        if ok:
-            print(f"[BrokerSnapshot] Logged in via proxy {proxy_host}")
-            return session, ""
-
-        errors.append(f"Proxy {proxy_host}: {err}")
-        print(f"[BrokerSnapshot] Attempt {i+1} failed: {err}")
-
-        # Wait a bit before retrying with next proxy
-        if i < retries - 1:
-            time.sleep(2)
-
-    all_errors = "; ".join(errors)
-    return None, f"All {retries} proxy attempts failed. Details: {all_errors}"
-
-
-# ── synchronous fetch (runs in thread) ─────────────────────────────────────
-
-def _fetch_sync(added_date: str) -> dict:
-    """Synchronous version using curl_cffi + proxy rotation to bypass Cloudflare."""
-
-    # Step 1: Login with proxy rotation
-    session, login_err = _login_with_retry()
-    if session is None:
-        return {"success": False, "error": login_err}
-
-    print(f"[BrokerSnapshot] Logged in as {BS_EMAIL}")
-
-    try:
-        # 2. Trigger export
-        export_resp = session.get(
-            f"{BASE_URL}/SearchCompanies/GenerateExport",
-            params={"added-date": added_date},
-            timeout=30,
-        )
-        export_data = export_resp.json()
-        if not export_data.get("Success"):
-            msg = export_data.get("Message", "Unknown error")
-            return {"success": False, "error": f"Export failed: {msg}"}
-
-        print(f"[BrokerSnapshot] Export started for {added_date}")
-
-        # 3. Poll until the file is ready (max ~5 minutes)
-        filename = None
-        for _ in range(150):
-            time.sleep(2)
-            status_resp = session.get(
-                f"{BASE_URL}/SearchCompanies/GetStatusExport",
-                params={"added-date": added_date},
-                timeout=30,
-            )
-            status_data = status_resp.json().get("Data")
-            if status_data and status_data.get("FileName"):
-                filename = status_data["FileName"]
-                break
-            if status_data and status_data.get("Percent"):
-                print(f"[BrokerSnapshot]   {status_data['Percent']}%...")
-
-        if not filename:
-            return {"success": False, "error": "Export timed out after 5 minutes."}
-
-        # 4. Download CSV
-        dl_resp = session.get(
-            f"{BASE_URL}/SearchCompanies/DownloadExport",
-            params={"Key": filename},
-            timeout=60,
-        )
-        csv_bytes = dl_resp.content
-        print(f"[BrokerSnapshot] Downloaded {len(csv_bytes):,} bytes")
-
-        # 5. Parse
-        records = _parse_csv(csv_bytes, added_date)
-        print(f"[BrokerSnapshot] Parsed {len(records)} records")
-
-        return {"success": True, "records": records, "count": len(records)}
-
-    except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
-
-
-# ── public async entry-point ───────────────────────────────────────────────
-
-async def fetch_broker_snapshot(added_date: str) -> dict:
-    """Fetch the broker-snapshot CSV for *added_date* and return parsed records.
-
-    Returns ``{"success": True, "records": [...], "count": N}`` on success,
-    or ``{"success": False, "error": "..."}`` on failure.
+def _scrape_broker_snapshot_sync(
+    added_date: str,
+    on_progress: Optional[callable] = None,
+) -> dict:
+    """Synchronous BrokerSnapshot scraper using curl_cffi with Chrome TLS impersonation.
+    curl_cffi impersonates Chrome's TLS fingerprint, which is required to
+    bypass BrokerSnapshot's anti-bot / Cloudflare-style detection.
+    Standard HTTP clients (httpx, requests) get blocked at login.
+    Args:
+        added_date: Date string in YYYY-MM-DD format.
+        on_progress: Optional callback(percent: int, message: str).
+    Returns:
+        dict with keys: success, count, records, error
     """
     if not BS_EMAIL or not BS_PASSWORD:
         return {
             "success": False,
-            "error": (
-                "Broker Snapshot credentials not configured. "
-                "Set BROKER_SNAPSHOT_EMAIL and BROKER_SNAPSHOT_PASSWORD env vars."
-            ),
+            "error": "BrokerSnapshot credentials not configured. "
+                     "Set BROKER_SNAPSHOT_EMAIL and BROKER_SNAPSHOT_PASSWORD environment variables.",
+            "count": 0,
+            "records": [],
         }
-
-    # Run the synchronous curl_cffi call in a thread to avoid blocking
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, partial(_fetch_sync, added_date))
+    proxy_url = _get_proxy_url()
+    proxies = {}
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        session = curl_requests.Session(impersonate="chrome")
+        if on_progress:
+            on_progress(5, "Connecting to BrokerSnapshot...")
+        # 1. Get login page (establishes cookies + anti-forgery token)
+        login_page = session.get(f"{BASE_URL}/LogIn", proxies=proxies)
+        # Extract __AntiForgeryToken required by the login form
+        token_match = re.findall(
+            r'name="__AntiForgeryToken"[^>]*value="([^"]*)"', login_page.text
+        )
+        if not token_match:
+            token_match = re.findall(
+                r'value="([^"]*)"[^>]*name="__AntiForgeryToken"', login_page.text
+            )
+        anti_forgery_token = token_match[0] if token_match else ""
+        if on_progress:
+            on_progress(10, "Logging in...")
+        # 2. Login (must include anti-forgery token)
+        login_data = {
+            "__AntiForgeryToken": anti_forgery_token,
+            "email": BS_EMAIL,
+            "password": BS_PASSWORD,
+            "ReturnUrl": "",
+        }
+        resp = session.post(
+            f"{BASE_URL}/LogIn",
+            data=login_data,
+            proxies=proxies,
+            allow_redirects=True,
+        )
+        if "LogOff" not in resp.text:
+            return {
+                "success": False,
+                "error": "BrokerSnapshot login failed. Check credentials.",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(20, "Login successful. Triggering export...")
+        # 3. Trigger export
+        resp = session.get(
+            f"{BASE_URL}/SearchCompanies/GenerateExport",
+            params={"added-date": added_date},
+            proxies=proxies,
+        )
+        result = resp.json()
+        if not result.get("Success"):
+            return {
+                "success": False,
+                "error": f"Export failed: {result.get('Message', 'Unknown error')}",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(30, "Export started, polling for completion...")
+        # 4. Poll until ready
+        key = None
+        max_polls = 60
+        for poll in range(max_polls):
+            resp = session.get(
+                f"{BASE_URL}/SearchCompanies/GetStatusExport",
+                params={"added-date": added_date},
+                proxies=proxies,
+            )
+            d = resp.json().get("Data")
+            if d and d.get("FileName"):
+                key = d["FileName"]
+                break
+            pct = d.get("Percent", 0) if d else 0
+            if on_progress:
+                on_progress(30 + int(pct * 0.4), f"Generating export... {pct}%")
+            time.sleep(3)
+        if not key:
+            return {
+                "success": False,
+                "error": "Export timed out. BrokerSnapshot did not generate the file in time.",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(75, "Downloading CSV...")
+        # 5. Download CSV
+        resp = session.get(
+            f"{BASE_URL}/SearchCompanies/DownloadExport",
+            params={"Key": key},
+            proxies=proxies,
+        )
+        csv_bytes = resp.content
+        if not csv_bytes or len(csv_bytes) < 50:
+            return {
+                "success": False,
+                "error": "Downloaded file is empty or too small.",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(85, "Parsing CSV data...")
+        # 6. Parse CSV
+        records = parse_csv(csv_bytes, added_date)
+        if on_progress:
+            on_progress(100, f"Done! {len(records)} records parsed.")
+        return {
+            "success": True,
+            "count": len(records),
+            "records": records,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Scrape failed: {str(e)}",
+            "count": 0,
+            "records": [],
+        }
+async def scrape_broker_snapshot(
+    added_date: str,
+    on_progress: Optional[callable] = None,
+) -> dict:
+    """Async wrapper that runs the synchronous curl_cffi scraper in a thread.
+    curl_cffi is synchronous, so we offload the blocking I/O to a thread
+    to keep the FastAPI event loop responsive.
+    """
+    return await asyncio.to_thread(
+        _scrape_broker_snapshot_sync, added_date, on_progress
+    )
