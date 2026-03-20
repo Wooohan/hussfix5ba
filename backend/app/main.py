@@ -26,7 +26,10 @@ from app.database import (
     fetch_blocked_ips, block_ip, unblock_ip, is_ip_blocked,
     save_fmcsa_register_entries, fetch_fmcsa_register_by_date,
     get_fmcsa_extracted_dates, get_fmcsa_categories, delete_fmcsa_entries_before_date,
+    save_new_venture_records, fetch_new_ventures, get_new_venture_count,
+    get_new_venture_dates, delete_new_ventures_by_date,
 )
+from app.broker_snapshot import scrape_broker_snapshot
 
 
 @asynccontextmanager
@@ -659,4 +662,116 @@ async def api_get_fmcsa_categories():
 async def api_delete_fmcsa_before_date(date: str):
     """Delete FMCSA register entries before a date."""
     deleted = await delete_fmcsa_entries_before_date(date)
+    return {"success": True, "deleted": deleted}
+
+
+# ── New Ventures Endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/new-ventures")
+async def api_fetch_new_ventures(
+    date_from: str = Query(None),
+    date_to: str = Query(None),
+    mc_number: str = Query(None),
+    dot_number: str = Query(None),
+    legal_name: str = Query(None),
+    active: str = Query(None),
+    state: str = Query(None),
+    has_email: str = Query(None),
+    hazmat: str = Query(None),
+    classification: str = Query(None),
+    carrier_operation: str = Query(None),
+    cargo: str = Query(None),
+    power_units_min: str = Query(None),
+    power_units_max: str = Query(None),
+    drivers_min: str = Query(None),
+    drivers_max: str = Query(None),
+    search: str = Query(None),
+    limit: int = Query(None),
+):
+    """Fetch new ventures with optional filters including date range."""
+    filters: dict = {}
+    if date_from: filters["date_from"] = date_from
+    if date_to: filters["date_to"] = date_to
+    if mc_number: filters["mc_number"] = mc_number
+    if dot_number: filters["dot_number"] = dot_number
+    if legal_name: filters["legal_name"] = legal_name
+    if active: filters["active"] = active
+    if state: filters["state"] = state
+    if has_email: filters["has_email"] = has_email
+    if hazmat: filters["hazmat"] = hazmat
+    if classification: filters["classification"] = classification.split(",")
+    if carrier_operation: filters["carrier_operation"] = carrier_operation.split(",")
+    if cargo: filters["cargo"] = cargo.split(",")
+    if power_units_min: filters["power_units_min"] = power_units_min
+    if power_units_max: filters["power_units_max"] = power_units_max
+    if drivers_min: filters["drivers_min"] = drivers_min
+    if drivers_max: filters["drivers_max"] = drivers_max
+    if search: filters["search"] = search
+    if limit is not None:
+        filters["limit"] = limit
+    data = await fetch_new_ventures(filters)
+    return data
+
+
+@app.get("/api/new-ventures/count")
+async def api_get_new_venture_count():
+    """Get the total new venture count."""
+    count = await get_new_venture_count()
+    return {"count": count}
+
+
+@app.get("/api/new-ventures/dates")
+async def api_get_new_venture_dates():
+    """Return all distinct date_added values."""
+    dates = await get_new_venture_dates()
+    return {"success": True, "dates": dates}
+
+
+@app.post("/api/new-ventures/scrape")
+async def api_scrape_new_ventures(request: Request):
+    """Admin-only: scrape BrokerSnapshot for a given date, save to DB."""
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Admin access required for scraping."},
+        )
+
+    body = await request.json()
+    date_str = body.get("date", "")
+    if not date_str:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "date is required (YYYY-MM-DD format)."},
+        )
+
+    result = await scrape_broker_snapshot(date_str)
+    if not result.get("success"):
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": result.get("error", "Unknown error")},
+        )
+
+    records = result.get("records", [])
+    today = __import__("datetime").date.today().isoformat()
+    db_result = await save_new_venture_records(records, today)
+
+    return {
+        "success": True,
+        "scraped": result.get("count", 0),
+        "saved": db_result.get("saved", 0),
+        "skipped": db_result.get("skipped", 0),
+    }
+
+
+@app.delete("/api/new-ventures/by-date/{date_added}")
+async def api_delete_new_ventures_by_date(date_added: str, request: Request):
+    """Admin-only: delete new ventures for a specific date."""
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Admin access required."},
+        )
+    deleted = await delete_new_ventures_by_date(date_added)
     return {"success": True, "deleted": deleted}
