@@ -1,9 +1,8 @@
 """BrokerSnapshot.com scraper for New Ventures data.
-
 Fetches newly-added carrier data from BrokerSnapshot by date,
 downloads the CSV export, parses it, and returns structured records.
+Uses curl_cffi with Chrome TLS impersonation to bypass anti-bot detection.
 """
-
 import os
 import csv
 import io
@@ -11,19 +10,14 @@ import asyncio
 import time
 import random
 from typing import Optional
-
-import httpx
-
+from curl_cffi import requests as curl_requests
 # ── Configuration (from environment) ─────────────────────────────────────────
 BS_EMAIL = os.getenv("BROKER_SNAPSHOT_EMAIL", "")
 BS_PASSWORD = os.getenv("BROKER_SNAPSHOT_PASSWORD", "")
-
 BS_PROXIES = os.getenv("BROKER_SNAPSHOT_PROXIES", "")  # comma-separated host:port
 BS_PROXY_USER = os.getenv("BROKER_SNAPSHOT_PROXY_USER", "")
 BS_PROXY_PASS = os.getenv("BROKER_SNAPSHOT_PROXY_PASS", "")
-
 BASE_URL = "https://brokersnapshot.com"
-
 # ── CSV column → DB field mapping ────────────────────────────────────────────
 # BrokerSnapshot CSV columns vary but typically include these.
 # We normalise them to snake_case DB column names.
@@ -122,7 +116,6 @@ _COLUMN_MAP: dict[str, str] = {
     "DUNS Number": "duns_number",
     "Out of Service Date": "out_of_service_date",
 }
-
 # All valid DB columns for new_ventures (used to filter unknown CSV columns)
 _VALID_COLUMNS = {
     "dot_number", "mc_number", "legal_name", "dba_name", "entity_type",
@@ -142,8 +135,6 @@ _VALID_COLUMNS = {
     "mcs150_mileage", "mcs150_mileage_year", "mcs150_date",
     "date_added", "state_carrier_id", "duns_number", "out_of_service_date",
 }
-
-
 def _get_proxy_url() -> Optional[str]:
     """Build a random proxy URL from environment config, or None."""
     if not BS_PROXIES or not BS_PROXY_USER:
@@ -153,8 +144,6 @@ def _get_proxy_url() -> Optional[str]:
         return None
     host = random.choice(hosts)
     return f"http://{BS_PROXY_USER}:{BS_PROXY_PASS}@{host}"
-
-
 def _normalise_column(raw: str) -> Optional[str]:
     """Map a raw CSV header to a DB column name."""
     stripped = raw.strip()
@@ -165,59 +154,48 @@ def _normalise_column(raw: str) -> Optional[str]:
         if key.lower() == stripped.lower():
             return val
     return None
-
-
 def _clean_val(val: str) -> str:
     """Strip whitespace and dash placeholders."""
     v = val.strip()
     if v in ("─", "-", "—", "N/A", "n/a", ""):
         return ""
     return v
-
-
 def parse_csv(csv_bytes: bytes, added_date: str) -> list[dict]:
     """Parse a BrokerSnapshot CSV export into a list of record dicts."""
     text = csv_bytes.decode("utf-8", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None:
         return []
-
     # Build column mapping for this specific CSV
     col_map: dict[str, str] = {}
     for raw_col in reader.fieldnames:
         db_col = _normalise_column(raw_col)
         if db_col and db_col in _VALID_COLUMNS:
             col_map[raw_col] = db_col
-
     records: list[dict] = []
     for row in reader:
         record: dict[str, str] = {}
         for csv_col, db_col in col_map.items():
             record[db_col] = _clean_val(row.get(csv_col, ""))
-
         # Ensure date_added is set
         if not record.get("date_added"):
             record["date_added"] = added_date
-
         # Skip rows without a DOT number (invalid)
         if not record.get("dot_number"):
             continue
-
         records.append(record)
-
     return records
-
-
-async def scrape_broker_snapshot(
+def _scrape_broker_snapshot_sync(
     added_date: str,
     on_progress: Optional[callable] = None,
 ) -> dict:
-    """Scrape BrokerSnapshot for carriers added on a specific date.
-
+    """Synchronous BrokerSnapshot scraper using curl_cffi with Chrome TLS impersonation.
+    curl_cffi impersonates Chrome's TLS fingerprint, which is required to
+    bypass BrokerSnapshot's anti-bot / Cloudflare-style detection.
+    Standard HTTP clients (httpx, requests) get blocked at login.
     Args:
         added_date: Date string in YYYY-MM-DD format.
         on_progress: Optional callback(percent: int, message: str).
-
     Returns:
         dict with keys: success, count, records, error
     """
@@ -229,130 +207,106 @@ async def scrape_broker_snapshot(
             "count": 0,
             "records": [],
         }
-
     proxy_url = _get_proxy_url()
-    proxy_kwarg: dict = {}
+    proxies = {}
     if proxy_url:
-        proxy_kwarg["proxy"] = proxy_url
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
-
+        proxies = {"http": proxy_url, "https": proxy_url}
     try:
-        async with httpx.AsyncClient(
-            timeout=120.0,
-            follow_redirects=True,
-            headers=headers,
-            **proxy_kwarg,
-        ) as client:
-            if on_progress:
-                on_progress(5, "Connecting to BrokerSnapshot...")
-
-            # 1. Get login page
-            await client.get(f"{BASE_URL}/LogIn")
-
-            if on_progress:
-                on_progress(10, "Logging in...")
-
-            # 2. Login
-            login_data = {
-                "email": BS_EMAIL,
-                "password": BS_PASSWORD,
-                "ReturnUrl": "",
-            }
-            resp = await client.post(f"{BASE_URL}/LogIn", data=login_data)
-            if "LogOff" not in resp.text:
-                return {
-                    "success": False,
-                    "error": "BrokerSnapshot login failed. Check credentials.",
-                    "count": 0,
-                    "records": [],
-                }
-
-            if on_progress:
-                on_progress(20, "Login successful. Triggering export...")
-
-            # 3. Trigger export
-            resp = await client.get(
-                f"{BASE_URL}/SearchCompanies/GenerateExport",
-                params={"added-date": added_date},
-            )
-            result = resp.json()
-            if not result.get("Success"):
-                return {
-                    "success": False,
-                    "error": f"Export failed: {result.get('Message', 'Unknown error')}",
-                    "count": 0,
-                    "records": [],
-                }
-
-            if on_progress:
-                on_progress(30, "Export started, polling for completion...")
-
-            # 4. Poll until ready
-            key = None
-            max_polls = 60
-            for poll in range(max_polls):
-                resp = await client.get(
-                    f"{BASE_URL}/SearchCompanies/GetStatusExport",
-                    params={"added-date": added_date},
-                )
-                d = resp.json().get("Data")
-                if d and d.get("FileName"):
-                    key = d["FileName"]
-                    break
-                pct = d.get("Percent", 0) if d else 0
-                if on_progress:
-                    on_progress(30 + int(pct * 0.4), f"Generating export... {pct}%")
-                await asyncio.sleep(3)
-
-            if not key:
-                return {
-                    "success": False,
-                    "error": "Export timed out. BrokerSnapshot did not generate the file in time.",
-                    "count": 0,
-                    "records": [],
-                }
-
-            if on_progress:
-                on_progress(75, "Downloading CSV...")
-
-            # 5. Download CSV
-            resp = await client.get(
-                f"{BASE_URL}/SearchCompanies/DownloadExport",
-                params={"Key": key},
-            )
-            csv_bytes = resp.content
-            if not csv_bytes or len(csv_bytes) < 50:
-                return {
-                    "success": False,
-                    "error": "Downloaded file is empty or too small.",
-                    "count": 0,
-                    "records": [],
-                }
-
-            if on_progress:
-                on_progress(85, "Parsing CSV data...")
-
-            # 6. Parse CSV
-            records = parse_csv(csv_bytes, added_date)
-
-            if on_progress:
-                on_progress(100, f"Done! {len(records)} records parsed.")
-
+        session = curl_requests.Session(impersonate="chrome")
+        if on_progress:
+            on_progress(5, "Connecting to BrokerSnapshot...")
+        # 1. Get login page (establishes cookies)
+        session.get(f"{BASE_URL}/LogIn", proxies=proxies)
+        if on_progress:
+            on_progress(10, "Logging in...")
+        # 2. Login
+        login_data = {
+            "email": BS_EMAIL,
+            "password": BS_PASSWORD,
+            "ReturnUrl": "",
+        }
+        resp = session.post(
+            f"{BASE_URL}/LogIn",
+            data=login_data,
+            proxies=proxies,
+            allow_redirects=True,
+        )
+        if "LogOff" not in resp.text:
             return {
-                "success": True,
-                "count": len(records),
-                "records": records,
+                "success": False,
+                "error": "BrokerSnapshot login failed. Check credentials.",
+                "count": 0,
+                "records": [],
             }
-
+        if on_progress:
+            on_progress(20, "Login successful. Triggering export...")
+        # 3. Trigger export
+        resp = session.get(
+            f"{BASE_URL}/SearchCompanies/GenerateExport",
+            params={"added-date": added_date},
+            proxies=proxies,
+        )
+        result = resp.json()
+        if not result.get("Success"):
+            return {
+                "success": False,
+                "error": f"Export failed: {result.get('Message', 'Unknown error')}",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(30, "Export started, polling for completion...")
+        # 4. Poll until ready
+        key = None
+        max_polls = 60
+        for poll in range(max_polls):
+            resp = session.get(
+                f"{BASE_URL}/SearchCompanies/GetStatusExport",
+                params={"added-date": added_date},
+                proxies=proxies,
+            )
+            d = resp.json().get("Data")
+            if d and d.get("FileName"):
+                key = d["FileName"]
+                break
+            pct = d.get("Percent", 0) if d else 0
+            if on_progress:
+                on_progress(30 + int(pct * 0.4), f"Generating export... {pct}%")
+            time.sleep(3)
+        if not key:
+            return {
+                "success": False,
+                "error": "Export timed out. BrokerSnapshot did not generate the file in time.",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(75, "Downloading CSV...")
+        # 5. Download CSV
+        resp = session.get(
+            f"{BASE_URL}/SearchCompanies/DownloadExport",
+            params={"Key": key},
+            proxies=proxies,
+        )
+        csv_bytes = resp.content
+        if not csv_bytes or len(csv_bytes) < 50:
+            return {
+                "success": False,
+                "error": "Downloaded file is empty or too small.",
+                "count": 0,
+                "records": [],
+            }
+        if on_progress:
+            on_progress(85, "Parsing CSV data...")
+        # 6. Parse CSV
+        records = parse_csv(csv_bytes, added_date)
+        if on_progress:
+            on_progress(100, f"Done! {len(records)} records parsed.")
+        return {
+            "success": True,
+            "count": len(records),
+            "records": records,
+        }
     except Exception as e:
         return {
             "success": False,
@@ -360,3 +314,14 @@ async def scrape_broker_snapshot(
             "count": 0,
             "records": [],
         }
+async def scrape_broker_snapshot(
+    added_date: str,
+    on_progress: Optional[callable] = None,
+) -> dict:
+    """Async wrapper that runs the synchronous curl_cffi scraper in a thread.
+    curl_cffi is synchronous, so we offload the blocking I/O to a thread
+    to keep the FastAPI event loop responsive.
+    """
+    return await asyncio.to_thread(
+        _scrape_broker_snapshot_sync, added_date, on_progress
+    )
