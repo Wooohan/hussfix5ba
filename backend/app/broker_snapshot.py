@@ -6,6 +6,7 @@ Uses curl_cffi with Chrome TLS impersonation to bypass anti-bot detection.
 import os
 import csv
 import io
+import re
 import asyncio
 import time
 import random
@@ -215,12 +216,22 @@ def _scrape_broker_snapshot_sync(
         session = curl_requests.Session(impersonate="chrome")
         if on_progress:
             on_progress(5, "Connecting to BrokerSnapshot...")
-        # 1. Get login page (establishes cookies)
-        session.get(f"{BASE_URL}/LogIn", proxies=proxies)
+        # 1. Get login page (establishes cookies + anti-forgery token)
+        login_page = session.get(f"{BASE_URL}/LogIn", proxies=proxies)
+        # Extract __AntiForgeryToken required by the login form
+        token_match = re.findall(
+            r'name="__AntiForgeryToken"[^>]*value="([^"]*)"', login_page.text
+        )
+        if not token_match:
+            token_match = re.findall(
+                r'value="([^"]*)"[^>]*name="__AntiForgeryToken"', login_page.text
+            )
+        anti_forgery_token = token_match[0] if token_match else ""
         if on_progress:
             on_progress(10, "Logging in...")
-        # 2. Login
+        # 2. Login (must include anti-forgery token)
         login_data = {
+            "__AntiForgeryToken": anti_forgery_token,
             "email": BS_EMAIL,
             "password": BS_PASSWORD,
             "ReturnUrl": "",
