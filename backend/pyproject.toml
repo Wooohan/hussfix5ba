@@ -12,6 +12,7 @@ python-dotenv = "^1.2.2"
 asyncpg = "^0.30.0"
 bcrypt = "^5.0.0"
 PyJWT = "^2.9.0"
+curl-cffi = "^0.14.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
