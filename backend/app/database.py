@@ -124,6 +124,81 @@ DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_users_updated_at();
 
+CREATE TABLE IF NOT EXISTS new_ventures (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    dot_number TEXT NOT NULL,
+    mc_number TEXT,
+    legal_name TEXT,
+    dba_name TEXT,
+    entity_type TEXT,
+    status TEXT,
+    email TEXT,
+    phone TEXT,
+    physical_address TEXT,
+    mailing_address TEXT,
+    power_units TEXT,
+    drivers TEXT,
+    cargo_carried TEXT,
+    hazmat_indicator TEXT,
+    operation_classification TEXT,
+    carrier_operation TEXT,
+    safety_rating TEXT,
+    safety_rating_type_code TEXT,
+    safety_rating_effective_date TEXT,
+    safety_rating_latest_review_type TEXT,
+    safety_rating_latest_review_date TEXT,
+    mcsip_step_number TEXT,
+    interstate_within_100 TEXT,
+    interstate_beyond_100 TEXT,
+    interstate_total TEXT,
+    intrastate_within_100 TEXT,
+    intrastate_beyond_100 TEXT,
+    intrastate_total TEXT,
+    avg_trip_leased_drivers TEXT,
+    grand_total_drivers TEXT,
+    total_cdl TEXT,
+    total_non_cdl TEXT,
+    total_trucks TEXT,
+    total_power_units TEXT,
+    fleet_size_code TEXT,
+    owned_trucks TEXT,
+    term_leased_trucks TEXT,
+    trip_leased_trucks TEXT,
+    owned_tractors TEXT,
+    term_leased_tractors TEXT,
+    trip_leased_tractors TEXT,
+    owned_trailers TEXT,
+    term_leased_trailers TEXT,
+    trip_leased_trailers TEXT,
+    recordable_accident_rate TEXT,
+    preventable_accident_rate TEXT,
+    mcs150_mileage TEXT,
+    mcs150_mileage_year TEXT,
+    mcs150_date TEXT,
+    state_carrier_id TEXT,
+    duns_number TEXT,
+    out_of_service_date TEXT,
+    date_added TEXT NOT NULL,
+    date_fetched TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(dot_number, date_added)
+);
+
+CREATE INDEX IF NOT EXISTS idx_new_ventures_dot ON new_ventures(dot_number);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_mc ON new_ventures(mc_number);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_date_added ON new_ventures(date_added DESC);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_legal_name ON new_ventures(legal_name);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_status ON new_ventures(status);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_created_at ON new_ventures(created_at DESC);
+
+CREATE OR REPLACE FUNCTION update_new_ventures_updated_at()
+RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_new_ventures_updated_at ON new_ventures;
+CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
+    FOR EACH ROW EXECUTE FUNCTION update_new_ventures_updated_at();
+
 -- ── Default admin user ──────────────────────────────────────────────────────
 INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extracted_today, ip_address, is_online, is_blocked)
 VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
@@ -915,6 +990,277 @@ async def delete_fmcsa_entries_before_date(date: str) -> int:
         return int(parts[-1]) if len(parts) > 1 else 0
     except Exception as e:
         print(f"[DB] Error deleting FMCSA entries: {e}")
+        return 0
+
+
+def _new_venture_row_to_dict(row) -> dict:
+    """Convert an asyncpg Record for a new_venture to a plain dict."""
+    d = dict(row)
+    for key in ("created_at", "updated_at"):
+        if key in d and d[key] is not None:
+            d[key] = d[key].isoformat()
+    if "id" in d and d["id"] is not None:
+        d["id"] = str(d["id"])
+    return d
+
+
+_NEW_VENTURE_COLUMNS = [
+    "dot_number", "mc_number", "legal_name", "dba_name", "entity_type",
+    "status", "email", "phone", "physical_address", "mailing_address",
+    "power_units", "drivers", "cargo_carried", "hazmat_indicator",
+    "operation_classification", "carrier_operation", "safety_rating",
+    "safety_rating_type_code", "safety_rating_effective_date",
+    "safety_rating_latest_review_type", "safety_rating_latest_review_date",
+    "mcsip_step_number", "interstate_within_100", "interstate_beyond_100",
+    "interstate_total", "intrastate_within_100", "intrastate_beyond_100",
+    "intrastate_total", "avg_trip_leased_drivers", "grand_total_drivers",
+    "total_cdl", "total_non_cdl", "total_trucks", "total_power_units",
+    "fleet_size_code", "owned_trucks", "term_leased_trucks", "trip_leased_trucks",
+    "owned_tractors", "term_leased_tractors", "trip_leased_tractors",
+    "owned_trailers", "term_leased_trailers", "trip_leased_trailers",
+    "recordable_accident_rate", "preventable_accident_rate",
+    "mcs150_mileage", "mcs150_mileage_year", "mcs150_date",
+    "state_carrier_id", "duns_number", "out_of_service_date",
+    "date_added", "date_fetched",
+]
+
+
+async def save_new_venture_records(records: list[dict], date_fetched: str) -> dict:
+    """Bulk upsert new venture records. Returns saved/skipped counts."""
+    pool = get_pool()
+    if not records:
+        return {"success": True, "saved": 0, "skipped": 0}
+
+    saved = 0
+    skipped = 0
+    batch_size = 200
+
+    col_names = ", ".join(_NEW_VENTURE_COLUMNS)
+    placeholders = ", ".join(f"${i+1}" for i in range(len(_NEW_VENTURE_COLUMNS)))
+    update_clauses = ", ".join(
+        f"{col} = EXCLUDED.{col}"
+        for col in _NEW_VENTURE_COLUMNS
+        if col not in ("dot_number", "date_added")
+    )
+
+    query = f"""
+        INSERT INTO new_ventures ({col_names})
+        VALUES ({placeholders})
+        ON CONFLICT (dot_number, date_added) DO UPDATE SET
+            {update_clauses},
+            updated_at = NOW()
+    """
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i + batch_size]
+                    args = []
+                    for rec in batch:
+                        row_args = tuple(
+                            rec.get(col, "") or ""
+                            for col in _NEW_VENTURE_COLUMNS
+                        )
+                        # Override date_fetched
+                        row_list = list(row_args)
+                        date_fetched_idx = _NEW_VENTURE_COLUMNS.index("date_fetched")
+                        row_list[date_fetched_idx] = date_fetched
+                        args.append(tuple(row_list))
+                    await conn.executemany(query, args)
+                    saved += len(batch)
+    except Exception as e:
+        print(f"[DB] Error saving new venture records: {e}")
+        skipped = len(records) - saved
+
+    return {"success": True, "saved": saved, "skipped": skipped}
+
+
+async def fetch_new_ventures(filters: dict) -> list[dict]:
+    """Fetch new ventures with optional filters including date range."""
+    pool = get_pool()
+
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    # Date range filter
+    if filters.get("date_from"):
+        conditions.append(f"date_added >= ${idx}")
+        params.append(filters["date_from"])
+        idx += 1
+    if filters.get("date_to"):
+        conditions.append(f"date_added <= ${idx}")
+        params.append(filters["date_to"])
+        idx += 1
+
+    if filters.get("mc_number"):
+        conditions.append(f"mc_number ILIKE ${idx}")
+        params.append(f"%{filters['mc_number']}%")
+        idx += 1
+
+    if filters.get("dot_number"):
+        conditions.append(f"dot_number ILIKE ${idx}")
+        params.append(f"%{filters['dot_number']}%")
+        idx += 1
+
+    if filters.get("legal_name"):
+        conditions.append(f"legal_name ILIKE ${idx}")
+        params.append(f"%{filters['legal_name']}%")
+        idx += 1
+
+    active = filters.get("active")
+    if active == "true":
+        conditions.append(f"status ILIKE ${idx}")
+        params.append("%AUTHORIZED%")
+        idx += 1
+        conditions.append(f"status NOT ILIKE ${idx}")
+        params.append("%NOT%")
+        idx += 1
+    elif active == "false":
+        conditions.append(f"(status ILIKE ${idx} OR status NOT ILIKE ${idx + 1})")
+        params.append("%NOT AUTHORIZED%")
+        params.append("%AUTHORIZED%")
+        idx += 2
+
+    if filters.get("state"):
+        states = filters["state"].split("|")
+        or_clauses = []
+        for s in states:
+            or_clauses.append(f"physical_address ILIKE ${idx}")
+            params.append(f"%, {s}%")
+            idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    has_email = filters.get("has_email")
+    if has_email == "true":
+        conditions.append("email IS NOT NULL AND email != ''")
+    elif has_email == "false":
+        conditions.append("(email IS NULL OR email = '')")
+
+    hazmat = filters.get("hazmat")
+    if hazmat == "true":
+        conditions.append("(hazmat_indicator ILIKE '%yes%' OR hazmat_indicator = 'Y')")
+    elif hazmat == "false":
+        conditions.append("(hazmat_indicator IS NULL OR hazmat_indicator = '' OR hazmat_indicator ILIKE '%no%' OR hazmat_indicator = 'N')")
+
+    if filters.get("classification"):
+        classifications = filters["classification"]
+        if isinstance(classifications, str):
+            classifications = classifications.split(",")
+        or_clauses = []
+        for cls in classifications:
+            or_clauses.append(f"operation_classification ILIKE ${idx}")
+            params.append(f"%{cls}%")
+            idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    if filters.get("carrier_operation"):
+        ops = filters["carrier_operation"]
+        if isinstance(ops, str):
+            ops = ops.split(",")
+        or_clauses = []
+        for op in ops:
+            or_clauses.append(f"carrier_operation ILIKE ${idx}")
+            params.append(f"%{op}%")
+            idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    if filters.get("cargo"):
+        cargo = filters["cargo"]
+        if isinstance(cargo, str):
+            cargo = cargo.split(",")
+        or_clauses = []
+        for c in cargo:
+            or_clauses.append(f"cargo_carried ILIKE ${idx}")
+            params.append(f"%{c}%")
+            idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    if filters.get("power_units_min"):
+        conditions.append(f"NULLIF(power_units, '')::int >= ${idx}")
+        params.append(int(filters["power_units_min"]))
+        idx += 1
+    if filters.get("power_units_max"):
+        conditions.append(f"NULLIF(power_units, '')::int <= ${idx}")
+        params.append(int(filters["power_units_max"]))
+        idx += 1
+
+    if filters.get("drivers_min"):
+        conditions.append(f"NULLIF(drivers, '')::int >= ${idx}")
+        params.append(int(filters["drivers_min"]))
+        idx += 1
+    if filters.get("drivers_max"):
+        conditions.append(f"NULLIF(drivers, '')::int <= ${idx}")
+        params.append(int(filters["drivers_max"]))
+        idx += 1
+
+    if filters.get("search"):
+        conditions.append(
+            f"(legal_name ILIKE ${idx} OR dot_number ILIKE ${idx} "
+            f"OR mc_number ILIKE ${idx} OR email ILIKE ${idx})"
+        )
+        params.append(f"%{filters['search']}%")
+        idx += 1
+
+    where = " AND ".join(conditions) if conditions else "TRUE"
+
+    is_filtered = len(conditions) > 0
+    if is_filtered:
+        limit_val = int(filters.get("limit", 10000))
+    else:
+        limit_val = int(filters.get("limit", 200))
+
+    query = f"""
+        SELECT * FROM new_ventures
+        WHERE {where}
+        ORDER BY date_added DESC, created_at DESC
+        LIMIT {limit_val}
+    """
+
+    try:
+        rows = await pool.fetch(query, *params)
+        return [_new_venture_row_to_dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching new ventures: {e}")
+        return []
+
+
+async def get_new_venture_count() -> int:
+    """Return total number of new ventures."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM new_ventures")
+        return row["cnt"] if row else 0
+    except Exception as e:
+        print(f"[DB] Error getting new venture count: {e}")
+        return 0
+
+
+async def get_new_venture_dates() -> list[str]:
+    """Return distinct date_added values, sorted descending."""
+    pool = get_pool()
+    try:
+        rows = await pool.fetch(
+            "SELECT DISTINCT date_added FROM new_ventures ORDER BY date_added DESC"
+        )
+        return [row["date_added"] for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching new venture dates: {e}")
+        return []
+
+
+async def delete_new_ventures_by_date(date_added: str) -> int:
+    """Delete new venture entries for a specific date. Returns count deleted."""
+    pool = get_pool()
+    try:
+        result = await pool.execute(
+            "DELETE FROM new_ventures WHERE date_added = $1", date_added
+        )
+        parts = result.split(" ")
+        return int(parts[-1]) if len(parts) > 1 else 0
+    except Exception as e:
+        print(f"[DB] Error deleting new ventures: {e}")
         return 0
 
 
