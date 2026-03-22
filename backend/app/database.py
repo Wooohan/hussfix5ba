@@ -1265,10 +1265,28 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
 
     # Operating status filter
     active = filters.get("active")
-    if active == "true":
-        conditions.append(f"operating_status ILIKE ${idx}")
+    if active == "active":
+        conditions.append(f"(operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1})")
         params.append("%AUTHORIZED%")
+        params.append("%NOT AUTHORIZED%")
+        idx += 2
+    elif active == "inactive":
+        conditions.append(f"(operating_status ILIKE ${idx} OR operating_status IS NULL OR operating_status = '')")
+        params.append("%NOT AUTHORIZED%")
         idx += 1
+    elif active == "authorization_pending":
+        conditions.append(f"operating_status ILIKE ${idx}")
+        params.append("%PENDING%")
+        idx += 1
+    elif active == "not_authorized":
+        conditions.append(f"operating_status ILIKE ${idx}")
+        params.append("%NOT AUTHORIZED%")
+        idx += 1
+    elif active == "true":
+        conditions.append(f"(operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1})")
+        params.append("%AUTHORIZED%")
+        params.append("%NOT AUTHORIZED%")
+        idx += 2
     elif active == "false":
         conditions.append(f"operating_status NOT ILIKE ${idx}")
         params.append("%AUTHORIZED%")
@@ -1370,12 +1388,22 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         LIMIT {limit_val} OFFSET {offset_val}
     """
 
+    count_query = f"""
+        SELECT COUNT(*) as cnt FROM new_ventures
+        WHERE {where}
+    """
+
     try:
         rows = await pool.fetch(query, *params)
-        return [_new_venture_row_to_dict(row) for row in rows]
+        count_row = await pool.fetchrow(count_query, *params)
+        filtered_count = count_row["cnt"] if count_row else 0
+        return {
+            "data": [_new_venture_row_to_dict(row) for row in rows],
+            "filtered_count": filtered_count,
+        }
     except Exception as e:
         print(f"[DB] Error fetching new ventures: {e}")
-        return []
+        return {"data": [], "filtered_count": 0}
 
 
 async def get_new_venture_count() -> int:
