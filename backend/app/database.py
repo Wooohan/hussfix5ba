@@ -124,6 +124,192 @@ DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_users_updated_at();
 
+-- ── New Ventures table (ALL BrokerSnapshot CSV columns) ──────────────────────
+CREATE TABLE IF NOT EXISTS new_ventures (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    dot_number TEXT,
+    prefix TEXT,
+    docket_number TEXT,
+    status_code TEXT,
+    carship TEXT,
+    carrier_operation TEXT,
+    name TEXT,
+    name_dba TEXT,
+    add_date TEXT,
+    chgn_date TEXT,
+    common_stat TEXT,
+    contract_stat TEXT,
+    broker_stat TEXT,
+    common_app_pend TEXT,
+    contract_app_pend TEXT,
+    broker_app_pend TEXT,
+    common_rev_pend TEXT,
+    contract_rev_pend TEXT,
+    broker_rev_pend TEXT,
+    property_chk TEXT,
+    passenger_chk TEXT,
+    hhg_chk TEXT,
+    private_auth_chk TEXT,
+    enterprise_chk TEXT,
+    operating_status TEXT,
+    operating_status_indicator TEXT,
+    phy_str TEXT,
+    phy_city TEXT,
+    phy_st TEXT,
+    phy_zip TEXT,
+    phy_country TEXT,
+    phy_cnty TEXT,
+    mai_str TEXT,
+    mai_city TEXT,
+    mai_st TEXT,
+    mai_zip TEXT,
+    mai_country TEXT,
+    mai_cnty TEXT,
+    phy_undeliv TEXT,
+    mai_undeliv TEXT,
+    phy_phone TEXT,
+    phy_fax TEXT,
+    mai_phone TEXT,
+    mai_fax TEXT,
+    cell_phone TEXT,
+    email_address TEXT,
+    company_officer_1 TEXT,
+    company_officer_2 TEXT,
+    genfreight TEXT,
+    household TEXT,
+    metalsheet TEXT,
+    motorveh TEXT,
+    drivetow TEXT,
+    logpole TEXT,
+    bldgmat TEXT,
+    mobilehome TEXT,
+    machlrg TEXT,
+    produce TEXT,
+    liqgas TEXT,
+    intermodal TEXT,
+    passengers TEXT,
+    oilfield TEXT,
+    livestock TEXT,
+    grainfeed TEXT,
+    coalcoke TEXT,
+    meat TEXT,
+    garbage TEXT,
+    usmail TEXT,
+    chem TEXT,
+    drybulk TEXT,
+    coldfood TEXT,
+    beverages TEXT,
+    paperprod TEXT,
+    utility TEXT,
+    farmsupp TEXT,
+    construct TEXT,
+    waterwell TEXT,
+    cargoothr TEXT,
+    cargoothr_desc TEXT,
+    hm_ind TEXT,
+    bipd_req TEXT,
+    cargo_req TEXT,
+    bond_req TEXT,
+    bipd_file TEXT,
+    cargo_file TEXT,
+    bond_file TEXT,
+    owntruck TEXT,
+    owntract TEXT,
+    owntrail TEXT,
+    owncoach TEXT,
+    ownschool_1_8 TEXT,
+    ownschool_9_15 TEXT,
+    ownschool_16 TEXT,
+    ownbus_16 TEXT,
+    ownvan_1_8 TEXT,
+    ownvan_9_15 TEXT,
+    ownlimo_1_8 TEXT,
+    ownlimo_9_15 TEXT,
+    ownlimo_16 TEXT,
+    trmtruck TEXT,
+    trmtract TEXT,
+    trmtrail TEXT,
+    trmcoach TEXT,
+    trmschool_1_8 TEXT,
+    trmschool_9_15 TEXT,
+    trmschool_16 TEXT,
+    trmbus_16 TEXT,
+    trmvan_1_8 TEXT,
+    trmvan_9_15 TEXT,
+    trmlimo_1_8 TEXT,
+    trmlimo_9_15 TEXT,
+    trmlimo_16 TEXT,
+    trptruck TEXT,
+    trptract TEXT,
+    trptrail TEXT,
+    trpcoach TEXT,
+    trpschool_1_8 TEXT,
+    trpschool_9_15 TEXT,
+    trpschool_16 TEXT,
+    trpbus_16 TEXT,
+    trpvan_1_8 TEXT,
+    trpvan_9_15 TEXT,
+    trplimo_1_8 TEXT,
+    trplimo_9_15 TEXT,
+    trplimo_16 TEXT,
+    total_trucks TEXT,
+    total_buses TEXT,
+    total_pwr TEXT,
+    fleetsize TEXT,
+    inter_within_100 TEXT,
+    inter_beyond_100 TEXT,
+    total_inter_drivers TEXT,
+    intra_within_100 TEXT,
+    intra_beyond_100 TEXT,
+    total_intra_drivers TEXT,
+    total_drivers TEXT,
+    avg_tld TEXT,
+    total_cdl TEXT,
+    review_type TEXT,
+    review_id TEXT,
+    review_date TEXT,
+    recordable_crash_rate TEXT,
+    mcs150_mileage TEXT,
+    mcs151_mileage TEXT,
+    mcs150_mileage_year TEXT,
+    mcs150_date TEXT,
+    safety_rating TEXT,
+    safety_rating_date TEXT,
+    arber TEXT,
+    smartway TEXT,
+    tia TEXT,
+    tia_phone TEXT,
+    tia_contact_name TEXT,
+    tia_tool_free TEXT,
+    tia_fax TEXT,
+    tia_email TEXT,
+    tia_website TEXT,
+    phy_ups_store TEXT,
+    mai_ups_store TEXT,
+    phy_mail_box TEXT,
+    mai_mail_box TEXT,
+    raw_data JSONB,
+    scrape_date TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(dot_number, add_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_new_ventures_dot_number ON new_ventures(dot_number);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_docket_number ON new_ventures(docket_number);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_add_date ON new_ventures(add_date);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_name ON new_ventures(name);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_phy_st ON new_ventures(phy_st);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_operating_status ON new_ventures(operating_status);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_created_at ON new_ventures(created_at DESC);
+
+CREATE OR REPLACE FUNCTION update_new_ventures_updated_at()
+RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS update_new_ventures_updated_at ON new_ventures;
+CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
+    FOR EACH ROW EXECUTE FUNCTION update_new_ventures_updated_at();
+
 -- ── Default admin user ──────────────────────────────────────────────────────
 INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extracted_today, ip_address, is_online, is_blocked)
 VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
@@ -923,3 +1109,283 @@ def _to_jsonb(value) -> Optional[str]:
     if value is None:
         return None
     return json.dumps(value)
+
+
+# ── New Ventures (ALL BrokerSnapshot CSV columns) ──────────────────────────
+
+# All columns from the BrokerSnapshot CSV, in order, matching DB columns exactly
+_NV_COLUMNS = [
+    "dot_number", "prefix", "docket_number", "status_code", "carship",
+    "carrier_operation", "name", "name_dba", "add_date", "chgn_date",
+    "common_stat", "contract_stat", "broker_stat",
+    "common_app_pend", "contract_app_pend", "broker_app_pend",
+    "common_rev_pend", "contract_rev_pend", "broker_rev_pend",
+    "property_chk", "passenger_chk", "hhg_chk", "private_auth_chk", "enterprise_chk",
+    "operating_status", "operating_status_indicator",
+    "phy_str", "phy_city", "phy_st", "phy_zip", "phy_country", "phy_cnty",
+    "mai_str", "mai_city", "mai_st", "mai_zip", "mai_country", "mai_cnty",
+    "phy_undeliv", "mai_undeliv",
+    "phy_phone", "phy_fax", "mai_phone", "mai_fax", "cell_phone", "email_address",
+    "company_officer_1", "company_officer_2",
+    "genfreight", "household", "metalsheet", "motorveh", "drivetow", "logpole",
+    "bldgmat", "mobilehome", "machlrg", "produce", "liqgas", "intermodal",
+    "passengers", "oilfield", "livestock", "grainfeed", "coalcoke", "meat",
+    "garbage", "usmail", "chem", "drybulk", "coldfood", "beverages",
+    "paperprod", "utility", "farmsupp", "construct", "waterwell",
+    "cargoothr", "cargoothr_desc",
+    "hm_ind", "bipd_req", "cargo_req", "bond_req", "bipd_file", "cargo_file", "bond_file",
+    "owntruck", "owntract", "owntrail", "owncoach",
+    "ownschool_1_8", "ownschool_9_15", "ownschool_16", "ownbus_16",
+    "ownvan_1_8", "ownvan_9_15", "ownlimo_1_8", "ownlimo_9_15", "ownlimo_16",
+    "trmtruck", "trmtract", "trmtrail", "trmcoach",
+    "trmschool_1_8", "trmschool_9_15", "trmschool_16", "trmbus_16",
+    "trmvan_1_8", "trmvan_9_15", "trmlimo_1_8", "trmlimo_9_15", "trmlimo_16",
+    "trptruck", "trptract", "trptrail", "trpcoach",
+    "trpschool_1_8", "trpschool_9_15", "trpschool_16", "trpbus_16",
+    "trpvan_1_8", "trpvan_9_15", "trplimo_1_8", "trplimo_9_15", "trplimo_16",
+    "total_trucks", "total_buses", "total_pwr", "fleetsize",
+    "inter_within_100", "inter_beyond_100", "total_inter_drivers",
+    "intra_within_100", "intra_beyond_100", "total_intra_drivers",
+    "total_drivers", "avg_tld", "total_cdl",
+    "review_type", "review_id", "review_date", "recordable_crash_rate",
+    "mcs150_mileage", "mcs151_mileage", "mcs150_mileage_year", "mcs150_date",
+    "safety_rating", "safety_rating_date",
+    "arber", "smartway", "tia", "tia_phone", "tia_contact_name",
+    "tia_tool_free", "tia_fax", "tia_email", "tia_website",
+    "phy_ups_store", "mai_ups_store", "phy_mail_box", "mai_mail_box",
+]
+
+
+def _new_venture_row_to_dict(row) -> dict:
+    """Convert an asyncpg Record for a new_venture to a plain dict."""
+    d = dict(row)
+    if "raw_data" in d:
+        d["raw_data"] = _parse_jsonb(d["raw_data"])
+    for key in ("created_at", "updated_at"):
+        if key in d and d[key] is not None:
+            d[key] = d[key].isoformat()
+    if "id" in d and d["id"] is not None:
+        d["id"] = str(d["id"])
+    return d
+
+
+async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dict:
+    """Save new venture entries in bulk. Each entry dict should have keys
+    matching the CSV column names (lowercase, underscored)."""
+    pool = get_pool()
+    if not entries:
+        return {"success": True, "saved": 0, "skipped": 0}
+
+    cols = _NV_COLUMNS + ["raw_data", "scrape_date"]
+    col_list = ", ".join(cols)
+    placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
+
+    # Build ON CONFLICT UPDATE for all columns except the unique constraint columns
+    update_cols = [c for c in cols if c not in ("dot_number", "add_date")]
+    on_conflict_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+    on_conflict_set += ", updated_at = NOW()"
+
+    insert_sql = f"""
+        INSERT INTO new_ventures ({col_list})
+        VALUES ({placeholders})
+        ON CONFLICT (dot_number, add_date) DO UPDATE SET {on_conflict_set}
+    """
+
+    saved = 0
+    skipped = 0
+    batch_size = 500
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for i in range(0, len(entries), batch_size):
+                    batch = entries[i:i + batch_size]
+                    args = []
+                    for entry in batch:
+                        row_args = []
+                        for col in _NV_COLUMNS:
+                            val = entry.get(col)
+                            row_args.append(val.strip() if isinstance(val, str) else val)
+                        row_args.append(_to_jsonb(entry.get("raw_data")))
+                        row_args.append(scrape_date)
+                        args.append(tuple(row_args))
+                    await conn.executemany(insert_sql, args)
+                    saved += len(batch)
+    except Exception as e:
+        print(f"[DB] Error batch-saving new venture entries: {e}")
+        skipped = len(entries) - saved
+
+    return {"success": True, "saved": saved, "skipped": skipped}
+
+
+async def fetch_new_ventures(filters: dict) -> list[dict]:
+    """Fetch new ventures with optional filters including date range."""
+    pool = get_pool()
+
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    # Search by docket_number (MC number equivalent)
+    if filters.get("docket_number"):
+        conditions.append(f"docket_number ILIKE ${idx}")
+        params.append(f"%{filters['docket_number']}%")
+        idx += 1
+
+    if filters.get("dot_number"):
+        conditions.append(f"dot_number ILIKE ${idx}")
+        params.append(f"%{filters['dot_number']}%")
+        idx += 1
+
+    # Search by company name
+    if filters.get("company_name"):
+        conditions.append(f"(name ILIKE ${idx} OR name_dba ILIKE ${idx})")
+        params.append(f"%{filters['company_name']}%")
+        idx += 1
+
+    # Date range filter (from - to) on add_date
+    if filters.get("date_from"):
+        conditions.append(f"add_date >= ${idx}")
+        params.append(filters["date_from"])
+        idx += 1
+    if filters.get("date_to"):
+        conditions.append(f"add_date <= ${idx}")
+        params.append(filters["date_to"])
+        idx += 1
+
+    # Operating status filter
+    active = filters.get("active")
+    if active == "true":
+        conditions.append(f"operating_status ILIKE ${idx}")
+        params.append("%AUTHORIZED%")
+        idx += 1
+    elif active == "false":
+        conditions.append(f"operating_status NOT ILIKE ${idx}")
+        params.append("%AUTHORIZED%")
+        idx += 1
+
+    # State filter
+    if filters.get("state"):
+        states = filters["state"].split("|")
+        or_clauses = []
+        for s in states:
+            or_clauses.append(f"phy_st ILIKE ${idx}")
+            params.append(f"%{s}%")
+            idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    # Has email
+    has_email = filters.get("has_email")
+    if has_email == "true":
+        conditions.append("email_address IS NOT NULL AND email_address != ''")
+    elif has_email == "false":
+        conditions.append("(email_address IS NULL OR email_address = '')")
+
+    # Carrier operation (single text column now)
+    if filters.get("carrier_operation"):
+        conditions.append(f"carrier_operation ILIKE ${idx}")
+        params.append(f"%{filters['carrier_operation']}%")
+        idx += 1
+
+    # HazMat indicator
+    if filters.get("hazmat"):
+        if filters["hazmat"] == "true":
+            conditions.append("hm_ind = 'Y'")
+        elif filters["hazmat"] == "false":
+            conditions.append("(hm_ind IS NULL OR hm_ind != 'Y')")
+
+    # Total power units
+    if filters.get("power_units_min"):
+        conditions.append(f"NULLIF(total_pwr, '')::int >= ${idx}")
+        params.append(int(filters["power_units_min"]))
+        idx += 1
+    if filters.get("power_units_max"):
+        conditions.append(f"NULLIF(total_pwr, '')::int <= ${idx}")
+        params.append(int(filters["power_units_max"]))
+        idx += 1
+
+    # Total drivers
+    if filters.get("drivers_min"):
+        conditions.append(f"NULLIF(total_drivers, '')::int >= ${idx}")
+        params.append(int(filters["drivers_min"]))
+        idx += 1
+    if filters.get("drivers_max"):
+        conditions.append(f"NULLIF(total_drivers, '')::int <= ${idx}")
+        params.append(int(filters["drivers_max"]))
+        idx += 1
+
+    # Insurance on file filters
+    if filters.get("bipd_on_file"):
+        if filters["bipd_on_file"] == "true":
+            conditions.append("bipd_file = 'Y'")
+        elif filters["bipd_on_file"] == "false":
+            conditions.append("(bipd_file IS NULL OR bipd_file != 'Y')")
+    if filters.get("cargo_on_file"):
+        if filters["cargo_on_file"] == "true":
+            conditions.append("cargo_file = 'Y'")
+        elif filters["cargo_on_file"] == "false":
+            conditions.append("(cargo_file IS NULL OR cargo_file != 'Y')")
+    if filters.get("bond_on_file"):
+        if filters["bond_on_file"] == "true":
+            conditions.append("bond_file = 'Y'")
+        elif filters["bond_on_file"] == "false":
+            conditions.append("(bond_file IS NULL OR bond_file != 'Y')")
+
+    where = " AND ".join(conditions) if conditions else "TRUE"
+
+    is_filtered = len(conditions) > 0
+    if is_filtered:
+        limit_val = int(filters.get("limit", 10000))
+    else:
+        limit_val = int(filters.get("limit", 200))
+
+    query = f"""
+        SELECT * FROM new_ventures
+        WHERE {where}
+        ORDER BY created_at DESC
+        LIMIT {limit_val}
+    """
+
+    try:
+        rows = await pool.fetch(query, *params)
+        return [_new_venture_row_to_dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching new ventures: {e}")
+        return []
+
+
+async def get_new_venture_count() -> int:
+    """Return total number of new venture records."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM new_ventures")
+        return row["cnt"] if row else 0
+    except Exception as e:
+        print(f"[DB] Error getting new venture count: {e}")
+        return 0
+
+
+async def get_new_venture_scraped_dates() -> list[str]:
+    """Return distinct add_date values, sorted descending."""
+    pool = get_pool()
+    try:
+        rows = await pool.fetch(
+            "SELECT DISTINCT add_date FROM new_ventures WHERE add_date IS NOT NULL ORDER BY add_date DESC"
+        )
+        return [row["add_date"] for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching new venture dates: {e}")
+        return []
+
+
+async def delete_new_venture(record_id: str) -> bool:
+    """Delete a new venture record by id."""
+    pool = get_pool()
+    try:
+        result = await pool.execute(
+            "DELETE FROM new_ventures WHERE id = $1", record_id
+        )
+        return not result.endswith("0")
+    except Exception as e:
+        print(f"[DB] Error deleting new venture {record_id}: {e}")
+        return False
