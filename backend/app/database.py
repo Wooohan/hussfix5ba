@@ -328,7 +328,6 @@ ON CONFLICT (email) DO NOTHING;
 
 
 async def connect_db() -> None:
-    """Connect to PostgreSQL, create tables if needed, and create a connection pool."""
     global _pool
     _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     try:
@@ -340,7 +339,6 @@ async def connect_db() -> None:
 
 
 async def close_db() -> None:
-    """Close the PostgreSQL connection pool."""
     global _pool
     if _pool:
         await _pool.close()
@@ -349,14 +347,12 @@ async def close_db() -> None:
 
 
 def get_pool() -> asyncpg.Pool:
-    """Return the connection pool."""
     if _pool is None:
         raise RuntimeError("Database not connected. Call connect_db() first.")
     return _pool
 
 
 async def upsert_carrier(record: dict) -> bool:
-    """Upsert a carrier record by mc_number."""
     pool = get_pool()
     mc = record.get("mc_number")
     if not mc:
@@ -449,7 +445,6 @@ async def upsert_carrier(record: dict) -> bool:
 
 
 async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
-    """Update insurance_policies for a carrier by dot_number."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -468,11 +463,6 @@ async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
 
 
 async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) -> dict:
-    """Save FMCSA register entries in bulk using a single transaction.
-
-    Uses batch INSERT with ON CONFLICT instead of individual queries,
-    which is significantly faster for large entry sets.
-    """
     pool = get_pool()
     if not entries:
         return {"success": True, "saved": 0, "skipped": 0}
@@ -520,7 +510,6 @@ async def fetch_fmcsa_register_by_date(
     category: Optional[str] = None,
     search_term: Optional[str] = None,
 ) -> list[dict]:
-    """Fetch FMCSA register entries by date_fetched with optional filters."""
     pool = get_pool()
 
     conditions = ["date_fetched = $1"]
@@ -551,7 +540,6 @@ async def fetch_fmcsa_register_by_date(
 
 
 async def get_fmcsa_extracted_dates() -> list[str]:
-    """Return distinct date_fetched values, sorted descending."""
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT DISTINCT date_fetched FROM fmcsa_register ORDER BY date_fetched DESC"
@@ -560,7 +548,6 @@ async def get_fmcsa_extracted_dates() -> list[str]:
 
 
 def _parse_jsonb(value) -> Optional[object]:
-    """Parse a JSONB string back to a Python object."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -572,7 +559,6 @@ def _parse_jsonb(value) -> Optional[object]:
 
 
 def _carrier_row_to_dict(row) -> dict:
-    """Convert an asyncpg Record for a carrier to a plain dict with parsed JSONB."""
     d = dict(row)
     for key in ("basic_scores", "oos_rates", "insurance_policies", "inspections", "crashes"):
         if key in d:
@@ -586,7 +572,6 @@ def _carrier_row_to_dict(row) -> dict:
 
 
 async def fetch_carriers(filters: dict) -> dict:
-    """Fetch carriers with optional filters."""
     pool = get_pool()
 
     conditions: list[str] = []
@@ -807,20 +792,10 @@ async def fetch_carriers(filters: dict) -> dict:
     else:
         limit_val = int(filters.get("limit", 200))
 
-    _LIST_COLS = (
-        "id, mc_number, dot_number, legal_name, dba_name, entity_type, "
-        "status, email, phone, power_units, drivers, non_cmv_units, "
-        "physical_address, mailing_address, date_scraped, "
-        "mcs150_date, mcs150_mileage, operation_classification, "
-        "carrier_operation, cargo_carried, out_of_service_date, "
-        "state_carrier_id, duns_number, safety_rating, safety_rating_date, "
-        "created_at, updated_at"
-    )
-
     offset_val = int(filters.get("offset", 0))
 
     query = f"""
-        SELECT {_LIST_COLS} FROM carriers
+        SELECT * FROM carriers
         WHERE {where}
         ORDER BY created_at DESC
         LIMIT {limit_val} OFFSET {offset_val}
@@ -845,7 +820,6 @@ async def fetch_carriers(filters: dict) -> dict:
 
 
 async def delete_carrier(mc_number: str) -> bool:
-    """Delete a carrier by mc_number."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -858,7 +832,6 @@ async def delete_carrier(mc_number: str) -> bool:
 
 
 async def get_carrier_count() -> int:
-    """Return total number of carriers."""
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM carriers")
@@ -869,7 +842,6 @@ async def get_carrier_count() -> int:
 
 
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
-    """Update safety fields for a carrier by dot_number."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -895,7 +867,6 @@ async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
 
 
 async def get_carriers_by_mc_range(start: str, end: str) -> list[dict]:
-    """Fetch carriers within a specific MC Number range (numeric comparison)."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -916,7 +887,6 @@ async def get_carriers_by_mc_range(start: str, end: str) -> list[dict]:
 
 
 def _user_row_to_dict(row) -> dict:
-    """Convert an asyncpg Record for a user to a plain dict."""
     d = dict(row)
     for key in ("created_at", "updated_at", "blocked_at"):
         if key in d and d[key] is not None:
@@ -927,7 +897,6 @@ def _user_row_to_dict(row) -> dict:
 
 
 async def fetch_users() -> list[dict]:
-    """Fetch all users ordered by created_at descending. Excludes password_hash."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -942,7 +911,6 @@ async def fetch_users() -> list[dict]:
 
 
 async def fetch_user_by_email(email: str) -> Optional[dict]:
-    """Fetch a single user by email. Excludes password_hash."""
     pool = get_pool()
     try:
         row = await pool.fetchrow(
@@ -960,7 +928,6 @@ async def fetch_user_by_email(email: str) -> Optional[dict]:
 
 
 async def create_user(user_data: dict) -> Optional[dict]:
-    """Insert a new user and return the created record."""
     pool = get_pool()
     try:
         row = await pool.fetchrow(
@@ -993,7 +960,6 @@ async def create_user(user_data: dict) -> Optional[dict]:
 
 
 async def update_user(user_id: str, user_data: dict) -> bool:
-    """Update an existing user by user_id."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -1022,7 +988,6 @@ async def update_user(user_id: str, user_data: dict) -> bool:
 
 
 async def delete_user(user_id: str) -> bool:
-    """Delete a user by user_id."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -1035,7 +1000,6 @@ async def delete_user(user_id: str) -> bool:
 
 
 async def get_user_password_hash(email: str) -> Optional[str]:
-    """Return the password_hash for a user by email."""
     pool = get_pool()
     try:
         row = await pool.fetchrow(
@@ -1050,7 +1014,6 @@ async def get_user_password_hash(email: str) -> Optional[str]:
 
 
 async def fetch_blocked_ips() -> list[dict]:
-    """Fetch all blocked IPs ordered by blocked_at descending."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -1063,7 +1026,6 @@ async def fetch_blocked_ips() -> list[dict]:
 
 
 async def block_ip(ip_address: str, reason: str) -> bool:
-    """Block an IP address."""
     pool = get_pool()
     try:
         await pool.execute(
@@ -1082,7 +1044,6 @@ async def block_ip(ip_address: str, reason: str) -> bool:
 
 
 async def unblock_ip(ip_address: str) -> bool:
-    """Unblock an IP address."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -1095,7 +1056,6 @@ async def unblock_ip(ip_address: str) -> bool:
 
 
 async def is_ip_blocked(ip_address: str) -> bool:
-    """Check if an IP address is blocked."""
     pool = get_pool()
     try:
         row = await pool.fetchrow(
@@ -1109,7 +1069,6 @@ async def is_ip_blocked(ip_address: str) -> bool:
 
 
 async def get_fmcsa_categories() -> list[str]:
-    """Return all unique categories from fmcsa_register."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -1122,7 +1081,6 @@ async def get_fmcsa_categories() -> list[str]:
 
 
 async def delete_fmcsa_entries_before_date(date: str) -> int:
-    """Delete FMCSA register entries before a date. Returns count deleted."""
     pool = get_pool()
     try:
         result = await pool.execute(
@@ -1136,15 +1094,11 @@ async def delete_fmcsa_entries_before_date(date: str) -> int:
 
 
 def _to_jsonb(value) -> Optional[str]:
-    """Convert a Python object to a JSON string for JSONB columns, or None."""
     if value is None:
         return None
     return json.dumps(value)
 
 
-# ── New Ventures (ALL BrokerSnapshot CSV columns) ──────────────────────────
-
-# All columns from the BrokerSnapshot CSV, in order, matching DB columns exactly
 _NV_COLUMNS = [
     "dot_number", "prefix", "docket_number", "status_code", "carship",
     "carrier_operation", "name", "name_dba", "add_date", "chgn_date",
@@ -1188,7 +1142,6 @@ _NV_COLUMNS = [
 
 
 def _new_venture_row_to_dict(row) -> dict:
-    """Convert an asyncpg Record for a new_venture to a plain dict."""
     d = dict(row)
     if "raw_data" in d:
         d["raw_data"] = _parse_jsonb(d["raw_data"])
@@ -1201,8 +1154,6 @@ def _new_venture_row_to_dict(row) -> dict:
 
 
 async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dict:
-    """Save new venture entries in bulk. Each entry dict should have keys
-    matching the CSV column names (lowercase, underscored)."""
     pool = get_pool()
     if not entries:
         return {"success": True, "saved": 0, "skipped": 0}
@@ -1211,7 +1162,6 @@ async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dic
     col_list = ", ".join(cols)
     placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
 
-    # Build ON CONFLICT UPDATE for all columns except the unique constraint columns
     update_cols = [c for c in cols if c not in ("dot_number", "add_date")]
     on_conflict_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
     on_conflict_set += ", updated_at = NOW()"
@@ -1250,14 +1200,12 @@ async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dic
 
 
 async def fetch_new_ventures(filters: dict) -> list[dict]:
-    """Fetch new ventures with optional filters including date range."""
     pool = get_pool()
 
     conditions: list[str] = []
     params: list = []
     idx = 1
 
-    # Search by docket_number (MC number equivalent)
     if filters.get("docket_number"):
         conditions.append(f"docket_number ILIKE ${idx}")
         params.append(f"%{filters['docket_number']}%")
@@ -1268,13 +1216,11 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append(f"%{filters['dot_number']}%")
         idx += 1
 
-    # Search by company name
     if filters.get("company_name"):
         conditions.append(f"(name ILIKE ${idx} OR name_dba ILIKE ${idx})")
         params.append(f"%{filters['company_name']}%")
         idx += 1
 
-    # Date range filter (from - to) on add_date
     if filters.get("date_from"):
         conditions.append(f"add_date >= ${idx}")
         params.append(filters["date_from"])
@@ -1284,7 +1230,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append(filters["date_to"])
         idx += 1
 
-    # Operating status filter
     active = filters.get("active")
     if active == "active":
         conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
@@ -1315,7 +1260,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append("%AUTHORIZED%")
         idx += 1
 
-    # State filter (exact match — state codes are 2-letter, no need for ILIKE)
     if filters.get("state"):
         states = [s.strip().upper() for s in filters["state"].split("|") if s.strip()]
         if len(states) == 1:
@@ -1329,27 +1273,23 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
                 params.append(s)
                 idx += 1
 
-    # Has email
     has_email = filters.get("has_email")
     if has_email == "true":
         conditions.append("email_address IS NOT NULL AND email_address != ''")
     elif has_email == "false":
         conditions.append("(email_address IS NULL OR email_address = '')")
 
-    # Carrier operation (single text column now)
     if filters.get("carrier_operation"):
         conditions.append(f"carrier_operation ILIKE ${idx}")
         params.append(f"%{filters['carrier_operation']}%")
         idx += 1
 
-    # HazMat indicator
     if filters.get("hazmat"):
         if filters["hazmat"] == "true":
             conditions.append("hm_ind = 'Y'")
         elif filters["hazmat"] == "false":
             conditions.append("(hm_ind IS NULL OR hm_ind != 'Y')")
 
-    # Total power units
     if filters.get("power_units_min"):
         conditions.append(f"NULLIF(total_pwr, '')::int >= ${idx}")
         params.append(int(filters["power_units_min"]))
@@ -1359,7 +1299,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append(int(filters["power_units_max"]))
         idx += 1
 
-    # Total drivers
     if filters.get("drivers_min"):
         conditions.append(f"NULLIF(total_drivers, '')::int >= ${idx}")
         params.append(int(filters["drivers_min"]))
@@ -1369,7 +1308,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append(int(filters["drivers_max"]))
         idx += 1
 
-    # Insurance on file filters
     if filters.get("bipd_on_file"):
         if filters["bipd_on_file"] == "true":
             conditions.append("bipd_file = 'Y'")
@@ -1394,14 +1332,12 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
     else:
         limit_val = int(filters.get("limit", 200))
 
-    # Select only columns needed for the table view — drastically reduces payload
     _LIST_COLS = (
         "id, name, name_dba, dot_number, docket_number, operating_status, "
         "phy_st, phy_phone, email_address, total_pwr, total_drivers, "
         "add_date, carrier_operation, hm_ind, created_at"
     )
 
-    # Pagination support
     offset_val = int(filters.get("offset", 0))
 
     query = f"""
@@ -1430,7 +1366,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
 
 
 async def get_new_venture_count() -> int:
-    """Return total number of new venture records."""
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM new_ventures")
@@ -1441,7 +1376,6 @@ async def get_new_venture_count() -> int:
 
 
 async def get_new_venture_scraped_dates() -> list[str]:
-    """Return distinct add_date values, sorted descending."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -1454,7 +1388,6 @@ async def get_new_venture_scraped_dates() -> list[str]:
 
 
 async def fetch_new_venture_by_id(record_id: str) -> dict | None:
-    """Fetch a single new venture record by id (includes raw_data)."""
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT * FROM new_ventures WHERE id = $1", record_id)
@@ -1467,7 +1400,6 @@ async def fetch_new_venture_by_id(record_id: str) -> dict | None:
 
 
 async def delete_new_venture(record_id: str) -> bool:
-    """Delete a new venture record by id."""
     pool = get_pool()
     try:
         result = await pool.execute(
