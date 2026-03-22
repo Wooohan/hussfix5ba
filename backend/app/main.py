@@ -29,7 +29,6 @@ from app.database import (
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Connect to PostgreSQL on startup, disconnect on shutdown."""
     await connect_db()
     yield
     await close_clients()
@@ -54,7 +53,6 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/api/blocked-ips/check/",
 )
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests to protected paths that lack a valid JWT Bearer token."""
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if request.method == "OPTIONS":
@@ -99,7 +97,6 @@ async def health():
     return {"status": "ok", "message": "FMCSA Scraper Backend is running"}
 @app.get("/api/get-ip")
 async def get_ip(request: Request):
-    """Return the client's IP address (replaces Vercel serverless function)."""
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
@@ -156,12 +153,10 @@ async def get_fmcsa_entries(
     category: str = Query(None),
     search: str = Query(None),
 ):
-    """Fetch FMCSA register entries from database by date."""
     entries = await fetch_fmcsa_register_by_date(extracted_date, category, search)
     return {"success": True, "count": len(entries), "entries": entries}
 @app.get("/api/fmcsa-register/dates")
 async def get_fmcsa_dates():
-    """Return all distinct date_fetched values stored in database."""
     dates = await get_fmcsa_extracted_dates()
     return {"success": True, "dates": dates}
 @app.get("/api/scrape/carrier/{mc_number}")
@@ -273,8 +268,8 @@ async def api_fetch_carriers(
     inspections_min: str = Query(None),
     inspections_max: str = Query(None),
     limit: int = Query(None),
+    offset: int = Query(0),
 ):
-    """Fetch carriers with optional filters."""
     filters = {}
     if mc_number: filters["mc_number"] = mc_number
     if dot_number: filters["dot_number"] = dot_number
@@ -312,17 +307,17 @@ async def api_fetch_carriers(
     if toway_max: filters["toway_max"] = toway_max
     if inspections_min: filters["inspections_min"] = inspections_min
     if inspections_max: filters["inspections_max"] = inspections_max
+    if offset > 0: filters["offset"] = offset
     if limit is not None:
         filters["limit"] = limit
     else:
-        has_filters = any(v for k, v in filters.items() if k != "limit")
+        has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
         if not has_filters:
             filters["limit"] = 200
-    data = await fetch_carriers(filters)
-    return data
+    result = await fetch_carriers(filters)
+    return result
 @app.post("/api/carriers")
 async def api_upsert_carrier(request: Request):
-    """Upsert a single carrier record."""
     body = await request.json()
     ok = await upsert_carrier(body)
     if ok:
@@ -330,7 +325,6 @@ async def api_upsert_carrier(request: Request):
     return JSONResponse(status_code=400, content={"success": False, "error": "Failed to upsert carrier"})
 @app.post("/api/carriers/batch")
 async def api_upsert_carriers_batch(request: Request):
-    """Upsert multiple carrier records."""
     body = await request.json()
     carriers_list = body.get("carriers", [])
     saved = 0
@@ -350,19 +344,16 @@ async def api_upsert_carriers_batch(request: Request):
     return {"success": failed == 0, "saved": saved, "failed": failed}
 @app.delete("/api/carriers/{mc_number}")
 async def api_delete_carrier(mc_number: str):
-    """Delete a carrier by MC number."""
     ok = await db_delete_carrier(mc_number)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found"})
 @app.get("/api/carriers/count")
 async def api_get_carrier_count():
-    """Get the total carrier count."""
     count = await get_carrier_count()
     return {"count": count}
 @app.put("/api/carriers/{dot_number}/insurance")
 async def api_update_carrier_insurance(dot_number: str, request: Request):
-    """Update insurance data for a carrier by DOT number."""
     body = await request.json()
     policies = body.get("policies", [])
     ok = await db_update_carrier_insurance(dot_number, policies)
@@ -371,7 +362,6 @@ async def api_update_carrier_insurance(dot_number: str, request: Request):
     return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found or update failed"})
 @app.put("/api/carriers/{dot_number}/safety")
 async def api_update_carrier_safety(dot_number: str, request: Request):
-    """Update safety data for a carrier by DOT number."""
     body = await request.json()
     ok = await db_update_carrier_safety(dot_number, body)
     if ok:
@@ -382,12 +372,10 @@ async def api_get_carriers_by_range(
     start: str = Query(...),
     end: str = Query(...),
 ):
-    """Fetch carriers within a specific MC Number range."""
     data = await get_carriers_by_mc_range(start, end)
     return data
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request):
-    """Authenticate with email + password, return a JWT token."""
     body = await request.json()
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
@@ -428,7 +416,6 @@ async def api_auth_login(request: Request):
     }
 @app.post("/api/auth/register")
 async def api_auth_register(request: Request):
-    """Register a new user and return a JWT token."""
     body = await request.json()
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
@@ -467,19 +454,16 @@ async def api_auth_register(request: Request):
     return {"token": token, "user": user}
 @app.get("/api/users")
 async def api_fetch_users():
-    """Fetch all users. Requires authentication."""
     users = await fetch_users()
     return users
 @app.get("/api/users/by-email/{email:path}")
 async def api_fetch_user_by_email(email: str):
-    """Fetch a single user by email."""
     user = await fetch_user_by_email(email)
     if user:
         return user
     return JSONResponse(status_code=404, content={"error": "User not found"})
 @app.post("/api/users")
 async def api_create_user(request: Request):
-    """Create a new user. Hashes password with bcrypt if provided."""
     body = await request.json()
     if body.get("password"):
         import bcrypt
@@ -494,7 +478,6 @@ async def api_create_user(request: Request):
     return JSONResponse(status_code=400, content={"error": "Failed to create user"})
 @app.put("/api/users/{user_id}")
 async def api_update_user(user_id: str, request: Request):
-    """Update a user by user_id."""
     body = await request.json()
     ok = await update_user(user_id, body)
     if ok:
@@ -502,14 +485,12 @@ async def api_update_user(user_id: str, request: Request):
     return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
 @app.delete("/api/users/{user_id}")
 async def api_delete_user(user_id: str):
-    """Delete a user by user_id."""
     ok = await delete_user(user_id)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
 @app.post("/api/users/verify-password")
 async def api_verify_password(request: Request):
-    """Verify a user password. Accepts plaintext password, verifies against bcrypt hash."""
     body = await request.json()
     email = body.get("email", "")
     password = body.get("password", "")
@@ -528,12 +509,10 @@ async def api_verify_password(request: Request):
     return {"valid": False}
 @app.get("/api/blocked-ips")
 async def api_fetch_blocked_ips():
-    """Fetch all blocked IPs."""
     ips = await fetch_blocked_ips()
     return ips
 @app.post("/api/blocked-ips")
 async def api_block_ip(request: Request):
-    """Block an IP address."""
     body = await request.json()
     ip = body.get("ip_address", "")
     reason = body.get("reason", "No reason provided")
@@ -543,19 +522,16 @@ async def api_block_ip(request: Request):
     return JSONResponse(status_code=400, content={"success": False, "error": "Failed to block IP"})
 @app.delete("/api/blocked-ips/{ip_address}")
 async def api_unblock_ip(ip_address: str):
-    """Unblock an IP address."""
     ok = await unblock_ip(ip_address)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "IP not found"})
 @app.get("/api/blocked-ips/check/{ip_address}")
 async def api_check_ip_blocked(ip_address: str):
-    """Check if an IP is blocked."""
     blocked = await is_ip_blocked(ip_address)
     return {"blocked": blocked}
 @app.post("/api/fmcsa-register/save")
 async def api_save_fmcsa_entries(request: Request):
-    """Save FMCSA register entries to database."""
     body = await request.json()
     entries = body.get("entries", [])
     extracted_date = body.get("extractedDate", "")
@@ -563,18 +539,14 @@ async def api_save_fmcsa_entries(request: Request):
     return result
 @app.get("/api/fmcsa-register/categories")
 async def api_get_fmcsa_categories():
-    """Get all unique FMCSA register categories."""
     categories = await get_fmcsa_categories()
     return {"categories": categories}
 @app.delete("/api/fmcsa-register/before/{date}")
 async def api_delete_fmcsa_before_date(date: str):
-    """Delete FMCSA register entries before a date."""
     deleted = await delete_fmcsa_entries_before_date(date)
     return {"success": True, "deleted": deleted}
-# ── New Ventures endpoints ──────────────────────────────────────────────────
 @app.post("/api/new-ventures/scrape")
 async def api_scrape_new_ventures(request: Request):
-    """Scrape BrokerSnapshot for a given date and save to database. Admin only."""
     user = getattr(request.state, "user", None)
     if not user or user.get("role") != "admin":
         return JSONResponse(status_code=403, content={"error": "Admin access required"})
@@ -620,7 +592,6 @@ async def api_fetch_new_ventures(
     limit: int = Query(None),
     offset: int = Query(0),
 ):
-    """Fetch new ventures with optional filters including date range and pagination."""
     filters = {}
     if docket_number: filters["docket_number"] = docket_number
     if dot_number: filters["dot_number"] = dot_number
@@ -650,25 +621,20 @@ async def api_fetch_new_ventures(
     return result
 @app.get("/api/new-ventures/count")
 async def api_get_new_venture_count():
-    """Get the total new venture record count."""
     count = await get_new_venture_count()
     return {"count": count}
 @app.get("/api/new-ventures/dates")
 async def api_get_new_venture_dates():
-    """Return all distinct added_date values stored in database."""
     dates = await get_new_venture_scraped_dates()
     return {"success": True, "dates": dates}
 @app.get("/api/new-ventures/detail/{record_id}")
 async def api_get_new_venture_detail(record_id: str):
-    """Fetch a single new venture record with full raw_data."""
     record = await fetch_new_venture_by_id(record_id)
     if record:
         return record
     return JSONResponse(status_code=404, content={"error": "Record not found"})
-
 @app.delete("/api/new-ventures/{record_id}")
 async def api_delete_new_venture(record_id: str):
-    """Delete a new venture record by id."""
     ok = await delete_new_venture(record_id)
     if ok:
         return {"success": True}
