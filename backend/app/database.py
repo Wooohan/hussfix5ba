@@ -302,6 +302,16 @@ CREATE INDEX IF NOT EXISTS idx_new_ventures_name ON new_ventures(name);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_phy_st ON new_ventures(phy_st);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_operating_status ON new_ventures(operating_status);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_created_at ON new_ventures(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_email ON new_ventures(email_address);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_hm_ind ON new_ventures(hm_ind);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_carrier_op ON new_ventures(carrier_operation);
+
+-- Trigram indexes for fast ILIKE text search on large tables
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_new_ventures_name_trgm ON new_ventures USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_name_dba_trgm ON new_ventures USING gin (name_dba gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_dot_trgm ON new_ventures USING gin (dot_number gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_new_ventures_docket_trgm ON new_ventures USING gin (docket_number gin_trgm_ops);
 
 CREATE OR REPLACE FUNCTION update_new_ventures_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
@@ -1264,15 +1274,19 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append("%AUTHORIZED%")
         idx += 1
 
-    # State filter
+    # State filter (exact match — state codes are 2-letter, no need for ILIKE)
     if filters.get("state"):
-        states = filters["state"].split("|")
-        or_clauses = []
-        for s in states:
-            or_clauses.append(f"phy_st ILIKE ${idx}")
-            params.append(f"%{s}%")
+        states = [s.strip().upper() for s in filters["state"].split("|") if s.strip()]
+        if len(states) == 1:
+            conditions.append(f"phy_st = ${idx}")
+            params.append(states[0])
             idx += 1
-        conditions.append(f"({' OR '.join(or_clauses)})")
+        elif states:
+            placeholders = ", ".join(f"${idx + i}" for i in range(len(states)))
+            conditions.append(f"phy_st IN ({placeholders})")
+            for s in states:
+                params.append(s)
+                idx += 1
 
     # Has email
     has_email = filters.get("has_email")
@@ -1339,11 +1353,21 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
     else:
         limit_val = int(filters.get("limit", 200))
 
+    # Select only columns needed for the table view — drastically reduces payload
+    _LIST_COLS = (
+        "id, name, name_dba, dot_number, docket_number, operating_status, "
+        "phy_st, phy_phone, email_address, total_pwr, total_drivers, "
+        "add_date, carrier_operation, hm_ind, created_at"
+    )
+
+    # Pagination support
+    offset_val = int(filters.get("offset", 0))
+
     query = f"""
-        SELECT * FROM new_ventures
+        SELECT {_LIST_COLS} FROM new_ventures
         WHERE {where}
         ORDER BY created_at DESC
-        LIMIT {limit_val}
+        LIMIT {limit_val} OFFSET {offset_val}
     """
 
     try:
@@ -1376,6 +1400,19 @@ async def get_new_venture_scraped_dates() -> list[str]:
     except Exception as e:
         print(f"[DB] Error fetching new venture dates: {e}")
         return []
+
+
+async def fetch_new_venture_by_id(record_id: str) -> dict | None:
+    """Fetch a single new venture record by id (includes raw_data)."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT * FROM new_ventures WHERE id = $1", record_id)
+        if row:
+            return _new_venture_row_to_dict(row)
+        return None
+    except Exception as e:
+        print(f"[DB] Error fetching new venture {record_id}: {e}")
+        return None
 
 
 async def delete_new_venture(record_id: str) -> bool:
