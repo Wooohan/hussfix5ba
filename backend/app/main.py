@@ -24,8 +24,8 @@ from app.database import (
     fetch_blocked_ips, block_ip, unblock_ip, is_ip_blocked,
     save_fmcsa_register_entries, fetch_fmcsa_register_by_date,
     get_fmcsa_extracted_dates, get_fmcsa_categories, delete_fmcsa_entries_before_date,
-    save_new_venture_entries, fetch_new_ventures, get_new_venture_count,
-    get_new_venture_scraped_dates, delete_new_venture,
+    save_new_venture_entries, fetch_new_ventures, fetch_new_venture_by_id,
+    get_new_venture_count, get_new_venture_scraped_dates, delete_new_venture,
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -618,8 +618,9 @@ async def api_fetch_new_ventures(
     cargo_on_file: str = Query(None),
     bond_on_file: str = Query(None),
     limit: int = Query(None),
+    offset: int = Query(0),
 ):
-    """Fetch new ventures with optional filters including date range."""
+    """Fetch new ventures with optional filters including date range and pagination."""
     filters = {}
     if docket_number: filters["docket_number"] = docket_number
     if dot_number: filters["dot_number"] = dot_number
@@ -638,10 +639,11 @@ async def api_fetch_new_ventures(
     if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
     if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
     if bond_on_file: filters["bond_on_file"] = bond_on_file
+    if offset > 0: filters["offset"] = offset
     if limit is not None:
         filters["limit"] = limit
     else:
-        has_filters = any(v for k, v in filters.items() if k != "limit")
+        has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
         if not has_filters:
             filters["limit"] = 200
     data = await fetch_new_ventures(filters)
@@ -656,6 +658,14 @@ async def api_get_new_venture_dates():
     """Return all distinct added_date values stored in database."""
     dates = await get_new_venture_scraped_dates()
     return {"success": True, "dates": dates}
+@app.get("/api/new-ventures/detail/{record_id}")
+async def api_get_new_venture_detail(record_id: str):
+    """Fetch a single new venture record with full raw_data."""
+    record = await fetch_new_venture_by_id(record_id)
+    if record:
+        return record
+    return JSONResponse(status_code=404, content={"error": "Record not found"})
+
 @app.delete("/api/new-ventures/{record_id}")
 async def api_delete_new_venture(record_id: str):
     """Delete a new venture record by id."""
