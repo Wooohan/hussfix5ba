@@ -646,8 +646,8 @@ async def api_fetch_new_ventures(
         has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
         if not has_filters:
             filters["limit"] = 200
-    data = await fetch_new_ventures(filters)
-    return data
+    result = await fetch_new_ventures(filters)
+    return result
 @app.get("/api/new-ventures/count")
 async def api_get_new_venture_count():
     """Get the total new venture record count."""
