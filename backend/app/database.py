@@ -1266,10 +1266,11 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
     # Operating status filter
     active = filters.get("active")
     if active == "active":
-        conditions.append(f"(operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1})")
+        conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
         params.append("%AUTHORIZED%")
         params.append("%NOT AUTHORIZED%")
-        idx += 2
+        params.append("ACTIVE")
+        idx += 3
     elif active == "inactive":
         conditions.append(f"(operating_status ILIKE ${idx} OR operating_status IS NULL OR operating_status = '')")
         params.append("%NOT AUTHORIZED%")
@@ -1283,10 +1284,11 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         params.append("%NOT AUTHORIZED%")
         idx += 1
     elif active == "true":
-        conditions.append(f"(operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1})")
+        conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
         params.append("%AUTHORIZED%")
         params.append("%NOT AUTHORIZED%")
-        idx += 2
+        params.append("ACTIVE")
+        idx += 3
     elif active == "false":
         conditions.append(f"operating_status NOT ILIKE ${idx}")
         params.append("%AUTHORIZED%")
