@@ -1,33 +1,21 @@
 """BrokerSnapshot.com scraper — downloads CSV exports by added-date.
-
 Uses curl_cffi for TLS fingerprint impersonation (same approach as the
 user's original Colab script).  Runs synchronously inside
 ``asyncio.to_thread`` so it doesn't block the FastAPI event loop.
 """
-
 import asyncio
 import csv
 import io
 import os
 import time
-
 from curl_cffi import requests as cffi_requests
-
-
-# ── Configuration (read from env vars) ──────────────────────────────────────
-BROKER_EMAIL = os.getenv("BROKER_SNAPSHOT_EMAIL", "")
-BROKER_PASSWORD = os.getenv("BROKER_SNAPSHOT_PASSWORD", "")
+# ── Configuration ──────────────────────────────────────────────────────────
 BASE_URL = "https://brokersnapshot.com"
-
-PROXY_URL = os.getenv("BROKER_SNAPSHOT_PROXY", "")
-
-
 def _get_proxies() -> dict:
-    if PROXY_URL:
-        return {"http": PROXY_URL, "https": PROXY_URL}
+    proxy_url = os.getenv("BROKER_SNAPSHOT_PROXY", "")
+    if proxy_url:
+        return {"http": proxy_url, "https": proxy_url}
     return {}
-
-
 # ── CSV column name → DB column name mapping ────────────────────────────────
 # The CSV headers from BrokerSnapshot use mixed case; our DB columns are
 # lowercase with underscores.  We map each CSV header to the exact DB column.
@@ -194,37 +182,28 @@ _CSV_TO_DB: dict[str, str] = {
     "phy_mailbox": "phy_mail_box",
     "mai_mailbox": "mai_mail_box",
 }
-
-
 def _normalise_row(row: dict) -> dict:
     """Map raw CSV row to our DB column names. Also stores full raw data."""
     mapped: dict = {}
     raw_data: dict = {}
-
     for csv_key, value in row.items():
         raw_data[csv_key] = value
         clean_key = csv_key.strip().lower()
         db_key = _CSV_TO_DB.get(clean_key)
         if db_key:
             mapped[db_key] = value.strip() if isinstance(value, str) and value else value
-
     mapped["raw_data"] = raw_data
     return mapped
-
-
 # ── Synchronous scrape function (run via to_thread) ─────────────────────────
-
 def _scrape_sync(added_date: str, progress_cb=None) -> dict:
     """Log into BrokerSnapshot, trigger an export for *added_date*, download
     the CSV and return parsed rows.
-
     Parameters
     ----------
     added_date : str
         Date string in ``YYYY-MM-DD`` format.
     progress_cb : callable, optional
         Called with ``(percent: int, message: str)`` for progress updates.
-
     Returns
     -------
     dict
@@ -233,22 +212,21 @@ def _scrape_sync(added_date: str, progress_cb=None) -> dict:
     """
     proxies = _get_proxies()
     session = cffi_requests.Session(impersonate="chrome")
-
-    email = BROKER_EMAIL
-    password = BROKER_PASSWORD
+    # Read credentials fresh each call so env-var changes are picked up
+    email = os.getenv("BROKER_SNAPSHOT_EMAIL", "")
+    password = os.getenv("BROKER_SNAPSHOT_PASSWORD", "")
     if not email or not password:
         return {"success": False, "error": "BROKER_SNAPSHOT_EMAIL / BROKER_SNAPSHOT_PASSWORD env vars not set"}
-
     def _report(pct: int, msg: str):
         if progress_cb:
             progress_cb(pct, msg)
         print(f"[BrokerSnapshot] {pct}% — {msg}")
-
     try:
         # 1. Get login page (grab cookies)
         _report(5, "Loading login page…")
         session.get(f"{BASE_URL}/LogIn", proxies=proxies, timeout=30)
-
+        # Small delay to avoid triggering anti-bot on rapid consecutive scrapes
+        time.sleep(2)
         # 2. Login
         _report(10, "Logging in…")
         login_data = {"email": email, "password": password, "ReturnUrl": ""}
@@ -261,9 +239,7 @@ def _scrape_sync(added_date: str, progress_cb=None) -> dict:
         )
         if "LogOff" not in resp.text:
             return {"success": False, "error": "Login failed — check credentials or proxy"}
-
         _report(20, "Login successful, starting export…")
-
         # 3. Trigger export
         export_params = {"added-date": added_date}
         resp = session.get(
@@ -275,9 +251,7 @@ def _scrape_sync(added_date: str, progress_cb=None) -> dict:
         result = resp.json()
         if not result.get("Success"):
             return {"success": False, "error": f"Export trigger failed: {result.get('Message', 'unknown')}"}
-
         _report(30, "Export started, polling for completion…")
-
         # 4. Poll until ready
         key = None
         max_polls = 120  # ~10 minutes with 5s sleep
@@ -296,12 +270,9 @@ def _scrape_sync(added_date: str, progress_cb=None) -> dict:
                 pct = min(30 + int(d["Percent"] * 0.5), 80)
                 _report(pct, f"Export {d['Percent']}% complete…")
             time.sleep(5)
-
         if not key:
             return {"success": False, "error": "Export timed out after polling"}
-
         _report(85, "Downloading CSV…")
-
         # 5. Download
         resp = session.get(
             f"{BASE_URL}/SearchCompanies/DownloadExport",
@@ -309,28 +280,22 @@ def _scrape_sync(added_date: str, progress_cb=None) -> dict:
             proxies=proxies,
             timeout=60,
         )
-
         _report(90, "Parsing CSV…")
-
         # 6. Parse CSV
         content = resp.content.decode("utf-8-sig", errors="replace")
         reader = csv.DictReader(io.StringIO(content))
         rows = [_normalise_row(row) for row in reader]
-
         # Set add_date for all rows if not already present
         for row in rows:
             if not row.get("add_date"):
                 row["add_date"] = added_date
-
         _report(100, f"Done — {len(rows)} records parsed")
         return {"success": True, "rows": rows, "count": len(rows)}
-
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
+    finally:
+        session.close()
 # ── Async wrapper ───────────────────────────────────────────────────────────
-
 async def scrape_broker_snapshot(added_date: str, progress_cb=None) -> dict:
     """Async wrapper around the synchronous scrape function."""
     return await asyncio.to_thread(_scrape_sync, added_date, progress_cb)
