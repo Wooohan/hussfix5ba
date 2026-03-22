@@ -585,8 +585,8 @@ def _carrier_row_to_dict(row) -> dict:
     return d
 
 
-async def fetch_carriers(filters: dict) -> list[dict]:
-    """Fetch carriers with optional filters. Mirrors the frontend's Supabase query logic."""
+async def fetch_carriers(filters: dict) -> dict:
+    """Fetch carriers with optional filters."""
     pool = get_pool()
 
     conditions: list[str] = []
@@ -802,25 +802,46 @@ async def fetch_carriers(filters: dict) -> list[dict]:
     where = " AND ".join(conditions) if conditions else "TRUE"
 
     is_filtered = len(conditions) > 0
-    limit_val = 200
     if is_filtered:
         limit_val = int(filters.get("limit", 10000))
     else:
         limit_val = int(filters.get("limit", 200))
 
+    _LIST_COLS = (
+        "id, mc_number, dot_number, legal_name, dba_name, entity_type, "
+        "status, email, phone, power_units, drivers, non_cmv_units, "
+        "physical_address, mailing_address, date_scraped, "
+        "mcs150_date, mcs150_mileage, operation_classification, "
+        "carrier_operation, cargo_carried, out_of_service_date, "
+        "state_carrier_id, duns_number, safety_rating, safety_rating_date, "
+        "created_at, updated_at"
+    )
+
+    offset_val = int(filters.get("offset", 0))
+
     query = f"""
-        SELECT * FROM carriers
+        SELECT {_LIST_COLS} FROM carriers
         WHERE {where}
         ORDER BY created_at DESC
-        LIMIT {limit_val}
+        LIMIT {limit_val} OFFSET {offset_val}
+    """
+
+    count_query = f"""
+        SELECT COUNT(*) as cnt FROM carriers
+        WHERE {where}
     """
 
     try:
         rows = await pool.fetch(query, *params)
-        return [_carrier_row_to_dict(row) for row in rows]
+        count_row = await pool.fetchrow(count_query, *params)
+        filtered_count = count_row["cnt"] if count_row else 0
+        return {
+            "data": [_carrier_row_to_dict(row) for row in rows],
+            "filtered_count": filtered_count,
+        }
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
-        return []
+        return {"data": [], "filtered_count": 0}
 
 
 async def delete_carrier(mc_number: str) -> bool:
