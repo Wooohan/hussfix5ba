@@ -12,7 +12,18 @@ from curl_cffi import requests as cffi_requests
 # ── Configuration ──────────────────────────────────────────────────────────
 BASE_URL = "https://brokersnapshot.com"
 def _get_proxies() -> dict:
-    proxy_url = os.getenv("BROKER_SNAPSHOT_PROXY", "")
+    """Build proxy dict. Checks WEBSHARE_PROXY_URL first, then falls back to
+    BROKER_SNAPSHOT_PROXY, then tries to build from user/pass env vars."""
+    proxy_url = (
+        os.getenv("WEBSHARE_PROXY_URL", "")
+        or os.getenv("BROKER_SNAPSHOT_PROXY", "")
+    )
+    if not proxy_url:
+        # Try building from individual user/pass env vars
+        user = os.getenv("BROKER_SNAPSHOT_PROXY_USER", "")
+        pwd = os.getenv("BROKER_SNAPSHOT_PROXY_PASS", "")
+        if user and pwd:
+            proxy_url = f"http://{user}:{pwd}@p.webshare.io:80/"
     if proxy_url:
         return {"http": proxy_url, "https": proxy_url}
     return {}
