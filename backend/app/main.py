@@ -17,7 +17,8 @@ from app.auth import create_token, verify_token, require_auth
 from app.database import (
     connect_db, close_db,
     upsert_carrier, fetch_carriers, delete_carrier as db_delete_carrier,
-    get_carrier_count, update_carrier_insurance as db_update_carrier_insurance,
+    get_carrier_count, get_carrier_dashboard_stats,
+    update_carrier_insurance as db_update_carrier_insurance,
     update_carrier_safety as db_update_carrier_safety, get_carriers_by_mc_range,
     fetch_users, fetch_user_by_email, create_user, update_user, delete_user,
     get_user_password_hash,
@@ -352,6 +353,10 @@ async def api_delete_carrier(mc_number: str):
 async def api_get_carrier_count():
     count = await get_carrier_count()
     return {"count": count}
+@app.get("/api/carriers/dashboard-stats")
+async def api_get_carrier_dashboard_stats():
+    stats = await get_carrier_dashboard_stats()
+    return stats
 @app.put("/api/carriers/{dot_number}/insurance")
 async def api_update_carrier_insurance(dot_number: str, request: Request):
     body = await request.json()
