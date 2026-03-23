@@ -841,6 +841,59 @@ async def get_carrier_count() -> int:
         return 0
 
 
+async def get_carrier_dashboard_stats() -> dict:
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status ILIKE '%AUTHORIZED%' AND status NOT ILIKE '%NOT%') AS active_carriers,
+                COUNT(*) FILTER (WHERE entity_type ILIKE '%BROKER%') AS brokers,
+                COUNT(*) FILTER (WHERE email IS NOT NULL AND email != '') AS with_email,
+                COUNT(*) FILTER (WHERE safety_rating IS NOT NULL AND safety_rating != '') AS with_safety_rating,
+                COUNT(*) FILTER (WHERE insurance_policies IS NOT NULL AND jsonb_array_length(insurance_policies) > 0) AS with_insurance,
+                COUNT(*) FILTER (WHERE inspections IS NOT NULL AND jsonb_array_length(inspections) > 0) AS with_inspections,
+                COUNT(*) FILTER (WHERE crashes IS NOT NULL AND jsonb_array_length(crashes) > 0) AS with_crashes,
+                COUNT(*) FILTER (WHERE status ILIKE '%NOT AUTHORIZED%') AS not_authorized
+            FROM carriers
+        """)
+        if not row:
+            return {
+                "total": 0, "active_carriers": 0, "brokers": 0,
+                "with_email": 0, "email_rate": "0",
+                "with_safety_rating": 0, "with_insurance": 0,
+                "with_inspections": 0, "with_crashes": 0,
+                "not_authorized": 0, "other": 0,
+            }
+        total = row["total"]
+        active = row["active_carriers"]
+        not_auth = row["not_authorized"]
+        with_email = row["with_email"]
+        email_rate = f"{(with_email / total * 100):.1f}" if total > 0 else "0"
+        return {
+            "total": total,
+            "active_carriers": active,
+            "brokers": row["brokers"],
+            "with_email": with_email,
+            "email_rate": email_rate,
+            "with_safety_rating": row["with_safety_rating"],
+            "with_insurance": row["with_insurance"],
+            "with_inspections": row["with_inspections"],
+            "with_crashes": row["with_crashes"],
+            "not_authorized": not_auth,
+            "other": total - active - not_auth,
+        }
+    except Exception as e:
+        print(f"[DB] Error getting dashboard stats: {e}")
+        return {
+            "total": 0, "active_carriers": 0, "brokers": 0,
+            "with_email": 0, "email_rate": "0",
+            "with_safety_rating": 0, "with_insurance": 0,
+            "with_inspections": 0, "with_crashes": 0,
+            "not_authorized": 0, "other": 0,
+        }
+
+
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
     pool = get_pool()
     try:
