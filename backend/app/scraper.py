@@ -1,4 +1,5 @@
 import httpx
+import os
 import re
 import asyncio
 from bs4 import BeautifulSoup
@@ -26,7 +27,13 @@ INSURANCE_HEADERS = {
 }
 
 _fmcsa_client: Optional[httpx.AsyncClient] = None
+_fmcsa_proxy_client: Optional[httpx.AsyncClient] = None
 _insurance_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_proxy_url() -> str:
+    """Get the rotating proxy URL from environment."""
+    return os.getenv("BROKER_SNAPSHOT_PROXY", "")
 
 
 def _get_fmcsa_client() -> httpx.AsyncClient:
@@ -38,6 +45,20 @@ def _get_fmcsa_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
     return _fmcsa_client
+
+
+def _get_fmcsa_proxy_client() -> httpx.AsyncClient:
+    """Get or create an FMCSA client that routes through the rotating proxy."""
+    global _fmcsa_proxy_client
+    if _fmcsa_proxy_client is None or _fmcsa_proxy_client.is_closed:
+        proxy_url = _get_proxy_url()
+        _fmcsa_proxy_client = httpx.AsyncClient(
+            timeout=20.0,
+            headers=HEADERS,
+            proxy=proxy_url if proxy_url else None,
+            limits=httpx.Limits(max_connections=30, max_keepalive_connections=20),
+        )
+    return _fmcsa_proxy_client
 
 
 def _get_insurance_client() -> httpx.AsyncClient:
@@ -54,18 +75,21 @@ def _get_insurance_client() -> httpx.AsyncClient:
 
 async def close_clients() -> None:
     """Close shared HTTP clients. Call on app shutdown."""
-    global _fmcsa_client, _insurance_client
+    global _fmcsa_client, _fmcsa_proxy_client, _insurance_client
     if _fmcsa_client and not _fmcsa_client.is_closed:
         await _fmcsa_client.aclose()
         _fmcsa_client = None
+    if _fmcsa_proxy_client and not _fmcsa_proxy_client.is_closed:
+        await _fmcsa_proxy_client.aclose()
+        _fmcsa_proxy_client = None
     if _insurance_client and not _insurance_client.is_closed:
         await _insurance_client.aclose()
         _insurance_client = None
 
 
-async def fetch_fmcsa(url: str, retries: int = 2, delay_ms: int = 300) -> Optional[str]:
-    """Fetch a page from FMCSA with retries."""
-    client = _get_fmcsa_client()
+async def fetch_fmcsa(url: str, retries: int = 2, delay_ms: int = 300, use_proxy: bool = False) -> Optional[str]:
+    """Fetch a page from FMCSA with retries. Optionally route through rotating proxy."""
+    client = _get_fmcsa_proxy_client() if use_proxy else _get_fmcsa_client()
     for attempt in range(retries + 1):
         try:
             resp = await client.get(url)
@@ -125,12 +149,13 @@ def find_marked_labels(soup: BeautifulSoup, summary: str) -> list[str]:
     return labels
 
 
-async def find_dot_email(dot_number: str) -> str:
+async def find_dot_email(dot_number: str, use_proxy: bool = False) -> str:
     """Fetch carrier email from FMCSA registration page."""
     if not dot_number:
         return ""
     html = await fetch_fmcsa(
-        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot_number}/CarrierRegistration.aspx"
+        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot_number}/CarrierRegistration.aspx",
+        use_proxy=use_proxy,
     )
     if not html:
         return ""
@@ -164,13 +189,14 @@ async def find_dot_email(dot_number: str) -> str:
     return ""
 
 
-async def fetch_safety_data(dot: str) -> dict:
+async def fetch_safety_data(dot: str, use_proxy: bool = False) -> dict:
     """Fetch safety rating and BASIC scores for a DOT number."""
     if not dot:
         return {"rating": "N/A", "ratingDate": "", "basicScores": [], "oosRates": []}
 
     html = await fetch_fmcsa(
-        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot}/CompleteProfile.aspx"
+        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot}/CompleteProfile.aspx",
+        use_proxy=use_proxy,
     )
     if not html:
         return {"rating": "N/A", "ratingDate": "", "basicScores": [], "oosRates": []}
@@ -226,13 +252,14 @@ async def fetch_safety_data(dot: str) -> dict:
     }
 
 
-async def fetch_inspection_and_crash_data(dot: str) -> dict:
+async def fetch_inspection_and_crash_data(dot: str, use_proxy: bool = False) -> dict:
     """Fetch inspection history and crash data for a DOT number."""
     if not dot:
         return {"inspections": [], "crashes": []}
 
     html = await fetch_fmcsa(
-        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot}/CompleteProfile.aspx"
+        f"https://ai.fmcsa.dot.gov/SMS/Carrier/{dot}/CompleteProfile.aspx",
+        use_proxy=use_proxy,
     )
     if not html:
         return {"inspections": [], "crashes": []}
@@ -408,10 +435,11 @@ async def fetch_insurance_data(dot: str) -> dict:
     return {"policies": policies, "raw": result}
 
 
-async def scrape_carrier(mc_number: str) -> Optional[dict]:
+async def scrape_carrier(mc_number: str, use_proxy: bool = False) -> Optional[dict]:
     """Scrape a single carrier by MC number. Returns carrier dict or None."""
     html = await fetch_fmcsa(
-        f"https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=MC_MX&query_string={mc_number}"
+        f"https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=MC_MX&query_string={mc_number}",
+        use_proxy=use_proxy,
     )
     if not html:
         return None
@@ -429,9 +457,9 @@ async def scrape_carrier(mc_number: str) -> Optional[dict]:
     status = re.sub(r"\s+", " ", status)
 
     if dot_number:
-        email_task = find_dot_email(dot_number)
-        safety_task = fetch_safety_data(dot_number)
-        inspection_task = fetch_inspection_and_crash_data(dot_number)
+        email_task = find_dot_email(dot_number, use_proxy=use_proxy)
+        safety_task = fetch_safety_data(dot_number, use_proxy=use_proxy)
+        inspection_task = fetch_inspection_and_crash_data(dot_number, use_proxy=use_proxy)
         email, safety, insp_data = await asyncio.gather(email_task, safety_task, inspection_task)
     else:
         email, safety, insp_data = "", None, None
