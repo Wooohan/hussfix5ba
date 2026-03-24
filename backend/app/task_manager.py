@@ -6,8 +6,6 @@ from app.scraper import scrape_carrier, fetch_insurance_data
 from app.database import upsert_carrier, update_carrier_insurance
 
 _MAX_COMPLETED_TASKS = 20
-_PROXY_CONCURRENCY = 20
-
 class TaskManager:
     def __init__(self):
         self.tasks: dict[str, dict] = {}
@@ -19,7 +17,6 @@ class TaskManager:
         include_carriers = config.get("includeCarriers", True)
         include_brokers = config.get("includeBrokers", False)
         only_authorized = config.get("onlyAuthorized", True)
-        use_proxy = config.get("useProxy", False)
         self.tasks[task_id] = {
             "id": task_id,
             "type": "scraper",
@@ -35,22 +32,15 @@ class TaskManager:
                 f"[{self._now()}] Task {task_id} started",
                 f"[{self._now()}] Targeting {record_count} records starting at MC# {start_point}",
                 f"[{self._now()}] Filters: carriers={include_carriers}, brokers={include_brokers}, authorized_only={only_authorized}",
-                f"[{self._now()}] Mode: {'PROXY + ASYNC (' + str(_PROXY_CONCURRENCY) + ' concurrent)' if use_proxy else 'Direct (sequential)'}",
             ],
             "scrapedData": [],
             "startedAt": datetime.now(timezone.utc).isoformat(),
             "stoppedAt": None,
         }
-        if use_proxy:
-            async_task = asyncio.create_task(
-                self._run_scraper_concurrent(task_id, start_point, record_count,
-                                             include_carriers, include_brokers, only_authorized)
-            )
-        else:
-            async_task = asyncio.create_task(
-                self._run_scraper(task_id, start_point, record_count,
-                                  include_carriers, include_brokers, only_authorized)
-            )
+        async_task = asyncio.create_task(
+            self._run_scraper(task_id, start_point, record_count,
+                              include_carriers, include_brokers, only_authorized)
+        )
         self._running_tasks[task_id] = async_task
         return task_id
     async def start_insurance_task(self, config: dict) -> str:
@@ -124,26 +114,9 @@ class TaskManager:
                 "stoppedAt": task.get("stoppedAt"),
             })
         return result
-    def _apply_filters(self, data: dict, include_carriers: bool,
-                        include_brokers: bool, only_authorized: bool) -> bool:
-        """Return True if the scraped carrier data matches the user's filters."""
-        entity_type = (data.get("entityType") or "").upper()
-        status_text = (data.get("status") or "").upper()
-        is_carrier = "CARRIER" in entity_type
-        is_broker = "BROKER" in entity_type
-        if not include_carriers and is_carrier and not is_broker:
-            return False
-        if not include_brokers and is_broker and not is_carrier:
-            return False
-        if only_authorized:
-            if "NOT AUTHORIZED" in status_text or "AUTHORIZED" not in status_text:
-                return False
-        return True
-
     async def _run_scraper(self, task_id: str, start: int, total: int,
                            include_carriers: bool, include_brokers: bool,
                            only_authorized: bool):
-        """Sequential scraper (no proxy)."""
         task = self.tasks[task_id]
         completed = 0
         extracted = 0
@@ -166,18 +139,30 @@ class TaskManager:
                     data = None
                 completed += 1
                 if data:
-                    if self._apply_filters(data, include_carriers, include_brokers, only_authorized):
+                    entity_type = (data.get("entityType") or "").upper()
+                    status_text = (data.get("status") or "").upper()
+                    is_carrier = "CARRIER" in entity_type
+                    is_broker = "BROKER" in entity_type
+                    matches_filter = True
+                    if not include_carriers and is_carrier and not is_broker:
+                        matches_filter = False
+                    if not include_brokers and is_broker and not is_carrier:
+                        matches_filter = False
+                    if only_authorized:
+                        if "NOT AUTHORIZED" in status_text or "AUTHORIZED" not in status_text:
+                            matches_filter = False
+                    if matches_filter:
                         extracted += 1
                         task["scrapedData"].append(data)
                         batch_buffer.append(data)
-                        self._add_log(task_id, f"[Success] MC {mc}: {data.get('legalName', 'Unknown')}")
+                        self._add_log(task_id, f"[Success] MC {mc}: {data.get("legalName", "Unknown")}")
                         if len(batch_buffer) >= BATCH_SIZE:
                             saved = await self._save_batch_to_db(batch_buffer)
                             db_saved += saved
                             self._add_log(task_id, f"DB Sync: {saved}/{len(batch_buffer)} records saved")
                             batch_buffer = []
                     else:
-                        self._add_log(task_id, f"[Filtered] MC {mc}: {data.get('legalName', '')} (didn't match filters)")
+                        self._add_log(task_id, f"[Filtered] MC {mc}: {data.get("legalName", "")} (didn't match filters)")
                 else:
                     failed += 1
                     self._add_log(task_id, f"[No Data] MC {mc}")
@@ -188,98 +173,6 @@ class TaskManager:
                 task["progress"] = round((completed / total) * 100)
         except asyncio.CancelledError:
             self._add_log(task_id, "Task cancelled. Saving remaining batch...")
-        if batch_buffer:
-            try:
-                saved = await self._save_batch_to_db(batch_buffer)
-                db_saved += saved
-                task["dbSaved"] = db_saved
-                self._add_log(task_id, f"Final sync: {saved} records saved")
-            except Exception:
-                self._add_log(task_id, "Failed to save final batch")
-        task["status"] = "stopped" if task["status"] == "stopping" else "completed"
-        task["stoppedAt"] = datetime.now(timezone.utc).isoformat()
-        task["scrapedData"] = []
-        self._add_log(task_id, f"Task finished. Extracted: {extracted}, DB saved: {db_saved}, Failed: {failed}")
-        if task_id in self._running_tasks:
-            del self._running_tasks[task_id]
-        self._cleanup_old_tasks()
-
-    async def _run_scraper_concurrent(self, task_id: str, start: int, total: int,
-                                      include_carriers: bool, include_brokers: bool,
-                                      only_authorized: bool):
-        """High-speed concurrent scraper using rotating proxies."""
-        task = self.tasks[task_id]
-        completed = 0
-        extracted = 0
-        db_saved = 0
-        failed = 0
-        batch_buffer: list[dict] = []
-        BATCH_SIZE = 50
-        sem = asyncio.Semaphore(_PROXY_CONCURRENCY)
-
-        async def _scrape_one(mc: str) -> tuple[str, dict | None]:
-            async with sem:
-                if task["status"] == "stopping":
-                    return mc, None
-                try:
-                    data = await scrape_carrier(mc, use_proxy=True)
-                    return mc, data
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    self._add_log(task_id, f"[Error] MC {mc}: {str(e)[:100]}")
-                    return mc, None
-
-        try:
-            # Process in chunks to update progress and save to DB regularly
-            chunk_size = _PROXY_CONCURRENCY
-            for chunk_start in range(0, total, chunk_size):
-                if task["status"] == "stopping":
-                    break
-                chunk_end = min(chunk_start + chunk_size, total)
-                mc_numbers = [str(start + i) for i in range(chunk_start, chunk_end)]
-                self._add_log(task_id, f"Batch scraping MC# {mc_numbers[0]}-{mc_numbers[-1]} ({chunk_start+1}-{chunk_end}/{total})...")
-
-                results = await asyncio.gather(
-                    *[_scrape_one(mc) for mc in mc_numbers],
-                    return_exceptions=True,
-                )
-
-                for result in results:
-                    if isinstance(result, Exception):
-                        failed += 1
-                        completed += 1
-                        continue
-                    mc, data = result
-                    completed += 1
-                    if data:
-                        if self._apply_filters(data, include_carriers, include_brokers, only_authorized):
-                            extracted += 1
-                            task["scrapedData"].append(data)
-                            batch_buffer.append(data)
-                            self._add_log(task_id, f"[Success] MC {mc}: {data.get('legalName', 'Unknown')}")
-                        else:
-                            self._add_log(task_id, f"[Filtered] MC {mc}: {data.get('legalName', '')}")
-                    else:
-                        failed += 1
-                        self._add_log(task_id, f"[No Data] MC {mc}")
-
-                # Save batch if buffer is full
-                if len(batch_buffer) >= BATCH_SIZE:
-                    saved = await self._save_batch_to_db(batch_buffer)
-                    db_saved += saved
-                    self._add_log(task_id, f"DB Sync: {saved}/{len(batch_buffer)} records saved")
-                    batch_buffer = []
-
-                task["completed"] = completed
-                task["extracted"] = extracted
-                task["dbSaved"] = db_saved
-                task["failed"] = failed
-                task["progress"] = round((completed / total) * 100)
-
-        except asyncio.CancelledError:
-            self._add_log(task_id, "Task cancelled. Saving remaining batch...")
-
         if batch_buffer:
             try:
                 saved = await self._save_batch_to_db(batch_buffer)
