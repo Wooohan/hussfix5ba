@@ -53,7 +53,6 @@ def _get_insurance_client() -> httpx.AsyncClient:
 
 
 async def close_clients() -> None:
-    """Close shared HTTP clients. Call on app shutdown."""
     global _fmcsa_client, _insurance_client
     if _fmcsa_client and not _fmcsa_client.is_closed:
         await _fmcsa_client.aclose()
@@ -64,7 +63,6 @@ async def close_clients() -> None:
 
 
 async def fetch_fmcsa(url: str, retries: int = 2, delay_ms: int = 300) -> Optional[str]:
-    """Fetch a page from FMCSA with retries."""
     client = _get_fmcsa_client()
     for attempt in range(retries + 1):
         try:
@@ -89,7 +87,6 @@ def clean_text(text: Optional[str]) -> str:
 
 
 def cf_decode_email(encoded: str) -> str:
-    """Decode Cloudflare-obfuscated email."""
     try:
         r = int(encoded[:2], 16)
         email = ""
@@ -101,7 +98,6 @@ def cf_decode_email(encoded: str) -> str:
 
 
 def find_value_by_label(soup: BeautifulSoup, label: str) -> str:
-    """Find a table value by its TH label text."""
     for th in soup.find_all("th"):
         th_text = clean_text(th.get_text())
         if label in th_text:
@@ -112,7 +108,6 @@ def find_value_by_label(soup: BeautifulSoup, label: str) -> str:
 
 
 def find_marked_labels(soup: BeautifulSoup, summary: str) -> list[str]:
-    """Find labels marked with X in a table with given summary."""
     table = soup.find("table", attrs={"summary": summary})
     if not table:
         return []
@@ -126,7 +121,6 @@ def find_marked_labels(soup: BeautifulSoup, summary: str) -> list[str]:
 
 
 async def find_dot_email(dot_number: str) -> str:
-    """Fetch carrier email from FMCSA registration page."""
     if not dot_number:
         return ""
     html = await fetch_fmcsa(
@@ -165,7 +159,6 @@ async def find_dot_email(dot_number: str) -> str:
 
 
 async def fetch_safety_data(dot: str) -> dict:
-    """Fetch safety rating and BASIC scores for a DOT number."""
     if not dot:
         return {"rating": "N/A", "ratingDate": "", "basicScores": [], "oosRates": []}
 
@@ -227,7 +220,6 @@ async def fetch_safety_data(dot: str) -> dict:
 
 
 async def fetch_inspection_and_crash_data(dot: str) -> dict:
-    """Fetch inspection history and crash data for a DOT number."""
     if not dot:
         return {"inspections": [], "crashes": []}
 
@@ -313,9 +305,6 @@ async def fetch_inspection_and_crash_data(dot: str) -> dict:
 
 
 async def fetch_insurance_data(dot: str) -> dict:
-    """Fetch insurance data for a DOT number from searchcarriers.com.
-    Uses multiple URL patterns and retry strategies to maximize success rate.
-    """
     if not dot:
         return {"policies": [], "raw": None}
 
@@ -333,7 +322,7 @@ async def fetch_insurance_data(dot: str) -> dict:
             try:
                 resp = await client.get(target_url)
                 if 400 <= resp.status_code < 500:
-                    break  # Don't retry 4xx for this URL, try next URL
+                    break
                 if resp.status_code == 200:
                     text = resp.text.strip()
                     if text and (text.startswith("{") or text.startswith("[")):
@@ -409,7 +398,6 @@ async def fetch_insurance_data(dot: str) -> dict:
 
 
 async def scrape_carrier(mc_number: str) -> Optional[dict]:
-    """Scrape a single carrier by MC number. Returns carrier dict or None."""
     html = await fetch_fmcsa(
         f"https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=MC_MX&query_string={mc_number}"
     )
