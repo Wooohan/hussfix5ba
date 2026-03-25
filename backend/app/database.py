@@ -1462,16 +1462,10 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
     else:
         limit_val = int(filters.get("limit", 200))
 
-    _LIST_COLS = (
-        "id, name, name_dba, dot_number, docket_number, operating_status, "
-        "phy_st, phy_phone, email_address, total_pwr, total_drivers, "
-        "add_date, carrier_operation, hm_ind, created_at"
-    )
-
     offset_val = int(filters.get("offset", 0))
 
     query = f"""
-        SELECT {_LIST_COLS} FROM new_ventures
+        SELECT * FROM new_ventures
         WHERE {where}
         ORDER BY created_at DESC
         LIMIT {limit_val} OFFSET {offset_val}
@@ -1482,17 +1476,27 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         WHERE {where}
     """
 
+    dates_query = "SELECT DISTINCT add_date FROM new_ventures WHERE add_date IS NOT NULL ORDER BY add_date DESC"
+
+    total_query = "SELECT COUNT(*) as cnt FROM new_ventures"
+
     try:
         rows = await pool.fetch(query, *params)
         count_row = await pool.fetchrow(count_query, *params)
         filtered_count = count_row["cnt"] if count_row else 0
+        date_rows = await pool.fetch(dates_query)
+        available_dates = [r["add_date"] for r in date_rows]
+        total_row = await pool.fetchrow(total_query)
+        total_count = total_row["cnt"] if total_row else 0
         return {
             "data": [_new_venture_row_to_dict(row) for row in rows],
             "filtered_count": filtered_count,
+            "total_count": total_count,
+            "available_dates": available_dates,
         }
     except Exception as e:
         print(f"[DB] Error fetching new ventures: {e}")
-        return {"data": [], "filtered_count": 0}
+        return {"data": [], "filtered_count": 0, "total_count": 0, "available_dates": []}
 
 
 async def get_new_venture_count() -> int:
