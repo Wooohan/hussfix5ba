@@ -281,7 +281,6 @@ class TaskManager:
             if len(logs) > 500:
                 self.tasks[task_id]["logs"] = logs[-500:]
     def _cleanup_old_tasks(self):
-        """Remove oldest completed/stopped tasks when exceeding the limit."""
         completed = [
             (tid, t) for tid, t in self.tasks.items()
             if t.get("status") in ("completed", "stopped")
