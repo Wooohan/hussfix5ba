@@ -1462,3 +1462,45 @@ async def delete_new_venture(record_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting new venture {record_id}: {e}")
         return False
+
+
+_INS_TYPE_MAP = {"1": "BI&PD", "2": "CARGO", "3": "BOND"}
+
+
+async def fetch_active_insurance(mc_number: str) -> list[dict]:
+    pool = get_pool()
+    docket = f"MC{mc_number}"
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT prefix_docket_number, ins_type_code, ins_class_code,
+                   max_cov_amount, underl_lim_amount, policy_no,
+                   effective_date, ins_form_code, name_company
+            FROM active_insurance
+            WHERE prefix_docket_number = $1
+            ORDER BY effective_date DESC
+            """,
+            docket,
+        )
+        results = []
+        for row in rows:
+            raw_amount = (row["max_cov_amount"] or "").strip()
+            try:
+                amount_int = int(raw_amount) * 1000
+                coverage = f"${amount_int:,}"
+            except (ValueError, TypeError):
+                coverage = raw_amount or "N/A"
+            type_code = (row["ins_type_code"] or "").strip()
+            results.append({
+                "type": _INS_TYPE_MAP.get(type_code, type_code),
+                "class": (row["ins_class_code"] or "").strip(),
+                "coverageAmount": coverage,
+                "policyNumber": (row["policy_no"] or "").strip(),
+                "effectiveDate": (row["effective_date"] or "").strip(),
+                "carrier": (row["name_company"] or "").strip(),
+                "formCode": (row["ins_form_code"] or "").strip(),
+            })
+        return results
+    except Exception as e:
+        print(f"[DB] Error fetching active insurance for MC {mc_number}: {e}")
+        return []
