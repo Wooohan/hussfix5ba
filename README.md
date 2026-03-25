@@ -192,8 +192,11 @@ The schema seeds a default admin:
 | `DATABASE_URL` | Yes | PostgreSQL connection string | _(none -- warns if missing)_ |
 | `JWT_SECRET` | Recommended | Secret key for signing JWT tokens | Random on startup (tokens don't survive restarts) |
 | `JWT_EXPIRY_SECONDS` | No | Token lifetime in seconds | `86400` (24 hours) |
-| `CORS_ORIGINS` | No | Comma-separated allowed origins | `*` (all origins) |
+| `CORS_ORIGINS` | Yes | Comma-separated allowed origins | `*` (all origins) |
 | `PORT` | No | Server port (Railway sets this) | `8000` |
+| `BROKER_SNAPSHOT_EMAIL/BROKER_SNAPSHOT_PASSWORD` | Yes | BrokerSnapshot Accounts Cred | `` |
+| `BROKER_SNAPSHOT_PROXYD` | Yes | Rotational Proxy Account For New Ventures Scraping | `` |
+
 
 ---
 
