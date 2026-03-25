@@ -690,31 +690,60 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["drivers_max"]))
         idx += 1
 
+    _INS_TYPE_CODE = {"BI&PD": "1", "CARGO": "2", "BOND": "3"}
+
     if filters.get("insurance_required"):
         ins_types = filters["insurance_required"]
         if isinstance(ins_types, str):
             ins_types = ins_types.split(",")
         or_clauses = []
         for itype in ins_types:
-            or_clauses.append(f"insurance_policies @> ${idx}::jsonb")
-            params.append(json.dumps([{"type": itype}]))
+            code = _INS_TYPE_CODE.get(itype, itype)
+            or_clauses.append(
+                f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            )
+            params.append(code)
             idx += 1
         conditions.append(f"({' OR '.join(or_clauses)})")
 
     bipd_on_file = filters.get("bipd_on_file")
     if bipd_on_file == "1":
-        conditions.append(f"insurance_policies @> ${idx}::jsonb")
-        params.append(json.dumps([{"type": "BI&PD"}]))
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("1")
+        idx += 1
+    elif bipd_on_file == "0":
+        conditions.append(
+            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("1")
         idx += 1
     cargo_on_file = filters.get("cargo_on_file")
     if cargo_on_file == "1":
-        conditions.append(f"insurance_policies @> ${idx}::jsonb")
-        params.append(json.dumps([{"type": "CARGO"}]))
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("2")
+        idx += 1
+    elif cargo_on_file == "0":
+        conditions.append(
+            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("2")
         idx += 1
     bond_on_file = filters.get("bond_on_file")
     if bond_on_file == "1":
-        conditions.append(f"insurance_policies @> ${idx}::jsonb")
-        params.append(json.dumps([{"type": "BOND"}]))
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("3")
+        idx += 1
+    elif bond_on_file == "0":
+        conditions.append(
+            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+        )
+        params.append("3")
         idx += 1
 
     if filters.get("oos_min"):
