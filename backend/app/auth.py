@@ -21,7 +21,6 @@ JWT_EXPIRY_SECONDS = int(os.getenv("JWT_EXPIRY_SECONDS", str(24 * 60 * 60)))
 
 
 def create_token(user_id: str, email: str, role: str) -> str:
-    """Create a signed JWT token for the given user."""
     now = int(time.time())
     payload = {
         "sub": user_id,
@@ -34,7 +33,6 @@ def create_token(user_id: str, email: str, role: str) -> str:
 
 
 def verify_token(token: str) -> Optional[dict]:
-    """Verify and decode a JWT token. Returns the payload dict or None."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
@@ -45,11 +43,6 @@ def verify_token(token: str) -> Optional[dict]:
 
 
 async def require_auth(request: Request) -> Optional[dict]:
-    """Extract and verify the Bearer token from the Authorization header.
-
-    Returns the decoded payload dict, or sends a 401 JSON response.
-    Attach this as a dependency on protected routes.
-    """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
