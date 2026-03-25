@@ -560,11 +560,41 @@ def _parse_jsonb(value) -> Optional[object]:
     return value
 
 
+_INS_TYPE_LABELS = {"1": "BI&PD", "2": "CARGO", "3": "BOND"}
+
+
+def _format_active_insurance(raw_filings) -> list[dict]:
+    if not raw_filings:
+        return []
+    results = []
+    for row in raw_filings:
+        raw_amount = (row.get("max_cov_amount") or "").strip()
+        try:
+            amount_int = int(raw_amount) * 1000
+            coverage = f"${amount_int:,}"
+        except (ValueError, TypeError):
+            coverage = raw_amount or "N/A"
+        type_code = (row.get("ins_type_code") or "").strip()
+        results.append({
+            "type": _INS_TYPE_LABELS.get(type_code, type_code),
+            "class": (row.get("ins_class_code") or "").strip(),
+            "coverageAmount": coverage,
+            "policyNumber": (row.get("policy_no") or "").strip(),
+            "effectiveDate": (row.get("effective_date") or "").strip(),
+            "carrier": (row.get("name_company") or "").strip(),
+            "formCode": (row.get("ins_form_code") or "").strip(),
+        })
+    return results
+
+
 def _carrier_row_to_dict(row) -> dict:
     d = dict(row)
     for key in ("basic_scores", "oos_rates", "insurance_policies", "inspections", "crashes"):
         if key in d:
             d[key] = _parse_jsonb(d[key])
+    if "active_insurance_filings" in d:
+        raw = _parse_jsonb(d["active_insurance_filings"])
+        d["active_insurance_filings"] = _format_active_insurance(raw)
     for key in ("created_at", "updated_at"):
         if key in d and d[key] is not None:
             d[key] = d[key].isoformat()
@@ -826,9 +856,25 @@ async def fetch_carriers(filters: dict) -> dict:
     offset_val = int(filters.get("offset", 0))
 
     query = f"""
-        SELECT * FROM carriers
+        SELECT c.*,
+          COALESCE(
+            (SELECT jsonb_agg(jsonb_build_object(
+              'ins_type_code', ai.ins_type_code,
+              'ins_class_code', ai.ins_class_code,
+              'max_cov_amount', ai.max_cov_amount,
+              'underl_lim_amount', ai.underl_lim_amount,
+              'policy_no', ai.policy_no,
+              'effective_date', ai.effective_date,
+              'ins_form_code', ai.ins_form_code,
+              'name_company', ai.name_company
+            ) ORDER BY ai.effective_date DESC)
+            FROM active_insurance ai
+            WHERE ai.prefix_docket_number = 'MC' || c.mc_number
+            ), '[]'::jsonb
+          ) AS active_insurance_filings
+        FROM carriers c
         WHERE {where}
-        ORDER BY created_at DESC
+        ORDER BY c.created_at DESC
         LIMIT {limit_val} OFFSET {offset_val}
     """
 
