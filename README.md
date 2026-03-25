@@ -1,4 +1,4 @@
-# FreightIntel  -- Developer Technical Guide
+# FreightIntel  -- Developer Technical Guide Made by Chatgpt After Analyzing FreightIntel Files
 
 ## Table of Contents
 
