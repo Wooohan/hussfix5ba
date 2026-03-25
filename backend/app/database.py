@@ -102,6 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
 
+CREATE INDEX IF NOT EXISTS idx_active_insurance_docket ON active_insurance(prefix_docket_number);
+
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
