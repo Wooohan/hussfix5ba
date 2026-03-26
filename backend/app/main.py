@@ -565,9 +565,22 @@ async def api_create_user(request: Request):
     return JSONResponse(status_code=400, content={"error": "Failed to create user"})
 @app.put("/api/users/{user_id}")
 async def api_update_user(user_id: str, request: Request):
-    if not _require_admin(request):
-        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    current_user = getattr(request.state, "user", None)
+    if not current_user:
+        return JSONResponse(status_code=401, content={"error": "Authentication required"})
     body = await request.json()
+    is_admin = current_user.get("role") == "admin"
+    is_self = current_user.get("sub") == user_id
+    if not is_admin and not is_self:
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    if is_self and not is_admin:
+        _SELF_ALLOWED_FIELDS = {"name", "is_online", "last_active", "ip_address"}
+        restricted = set(body.keys()) - _SELF_ALLOWED_FIELDS
+        if restricted:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"Cannot modify restricted fields: {', '.join(sorted(restricted))}"},
+            )
     ok = await update_user(user_id, body)
     if ok:
         return {"success": True}
