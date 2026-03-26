@@ -785,31 +785,41 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
 
     if filters.get("bipd_min"):
+        raw_min = int(filters["bipd_min"])
+        # max_cov_amount is stored in thousands (e.g. 750 = $750,000)
+        # If the user typed a value >= 10000, assume they meant full dollars and convert to thousands
+        compare_min = raw_min // 1000 if raw_min >= 10000 else raw_min
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
             f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric >= ${idx})"
         )
-        params.append(int(filters["bipd_min"]))
+        params.append(compare_min)
         idx += 1
     if filters.get("bipd_max"):
+        raw_max = int(filters["bipd_max"])
+        # max_cov_amount is stored in thousands (e.g. 750 = $750,000)
+        # If the user typed a value >= 10000, assume they meant full dollars and convert to thousands
+        compare_max = raw_max // 1000 if raw_max >= 10000 else raw_max
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
             f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric <= ${idx})"
         )
-        params.append(int(filters["bipd_max"]))
+        params.append(compare_max)
         idx += 1
 
     if filters.get("ins_effective_date_from"):
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date >= ${idx})"
+            f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
+            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') >= ${idx}::date)"
         )
         params.append(filters["ins_effective_date_from"])
         idx += 1
     if filters.get("ins_effective_date_to"):
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date <= ${idx})"
+            f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
+            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') <= ${idx}::date)"
         )
         params.append(filters["ins_effective_date_to"])
         idx += 1
