@@ -299,6 +299,7 @@ async def api_fetch_carriers(
     mc_number: str = Query(None),
     dot_number: str = Query(None),
     legal_name: str = Query(None),
+    entity_type: str = Query(None),
     active: str = Query(None),
     state: str = Query(None),
     has_email: str = Query(None),
@@ -315,6 +316,8 @@ async def api_fetch_carriers(
     insurance_required: str = Query(None),
     bipd_min: str = Query(None),
     bipd_max: str = Query(None),
+    ins_effective_date_from: str = Query(None),
+    ins_effective_date_to: str = Query(None),
     bipd_on_file: str = Query(None),
     cargo_on_file: str = Query(None),
     bond_on_file: str = Query(None),
@@ -339,6 +342,7 @@ async def api_fetch_carriers(
     if mc_number: filters["mc_number"] = mc_number
     if dot_number: filters["dot_number"] = dot_number
     if legal_name: filters["legal_name"] = legal_name
+    if entity_type: filters["entity_type"] = entity_type
     if active: filters["active"] = active
     if state: filters["state"] = state
     if has_email: filters["has_email"] = has_email
@@ -355,6 +359,8 @@ async def api_fetch_carriers(
     if insurance_required: filters["insurance_required"] = insurance_required.split(",")
     if bipd_min: filters["bipd_min"] = bipd_min
     if bipd_max: filters["bipd_max"] = bipd_max
+    if ins_effective_date_from: filters["ins_effective_date_from"] = ins_effective_date_from
+    if ins_effective_date_to: filters["ins_effective_date_to"] = ins_effective_date_to
     if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
     if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
     if bond_on_file: filters["bond_on_file"] = bond_on_file
