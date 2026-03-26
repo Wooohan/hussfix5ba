@@ -1,4 +1,8 @@
 import asyncio
+import ipaddress
+import re
+import time as _time_module
+from collections import defaultdict
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,7 +49,6 @@ _PUBLIC_PATHS: set[str] = {
     "/api/get-ip",
     "/api/auth/login",
     "/api/auth/register",
-    "/api/users/verify-password",
     "/api/blocked-ips/check",
 }
 _PUBLIC_PREFIXES: tuple[str, ...] = (
@@ -54,6 +57,39 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/openapi.json",
     "/api/blocked-ips/check/",
 )
+def _get_request_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.headers.get("x-real-ip", "") or (request.client.host if request.client else "")
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (in-memory, per-IP)
+# ---------------------------------------------------------------------------
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX_REQUESTS = 15  # max attempts per window for auth endpoints
+
+def _is_rate_limited(key: str, max_requests: int = _RATE_LIMIT_MAX_REQUESTS) -> bool:
+    now = _time_module.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    hits = _rate_limit_store[key]
+    # prune old entries
+    _rate_limit_store[key] = [t for t in hits if t > window_start]
+    if len(_rate_limit_store[key]) >= max_requests:
+        return True
+    _rate_limit_store[key].append(now)
+    return False
+
+
+def _require_admin(request: Request) -> dict | None:
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        return None
+    return user
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -69,12 +105,37 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         request.state.user = user_payload
         return await call_next(request)
+
+
+class IPBlockMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if request.method == "OPTIONS" or path in ("/health", "/healthz"):
+            return await call_next(request)
+        client_ip = _get_request_ip(request)
+        if client_ip:
+            blocked = await is_ip_blocked(client_ip)
+            if blocked:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "Your IP address has been blocked."},
+                )
+        return await call_next(request)
+
+
 app.add_middleware(AuthMiddleware)
-_cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+app.add_middleware(IPBlockMiddleware)
+_cors_raw = os.getenv("CORS_ORIGINS", "")
+if not _cors_raw:
+    import warnings
+    warnings.warn("CORS_ORIGINS is not set. Defaulting to restrictive CORS policy.")
+    _cors_origins = []
+else:
+    _cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins],
-    allow_credentials=True,
+    allow_origins=_cors_origins if _cors_origins else ["*"],
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -125,15 +186,17 @@ async def proxy(url: str = Query(...)):
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             }
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             resp = await client.get(url, headers=headers)
+        if resp.is_redirect:
+            return JSONResponse(status_code=502, content={"error": "Upstream redirect not allowed"})
         content_type = resp.headers.get("content-type", "text/html; charset=utf-8")
         return PlainTextResponse(content=resp.text, status_code=resp.status_code, headers={
             "Content-Type": content_type,
             "Access-Control-Allow-Origin": "*",
         })
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "Proxy request failed"})
 @app.post("/api/fmcsa-register")
 async def fmcsa_register(request: Request):
     body = await request.json()
@@ -345,7 +408,9 @@ async def api_upsert_carriers_batch(request: Request):
                 failed += 1
     return {"success": failed == 0, "saved": saved, "failed": failed}
 @app.delete("/api/carriers/{mc_number}")
-async def api_delete_carrier(mc_number: str):
+async def api_delete_carrier(mc_number: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ok = await db_delete_carrier(mc_number)
     if ok:
         return {"success": True}
@@ -382,6 +447,9 @@ async def api_get_carriers_by_range(
     return data
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"login:{client_ip}"):
+        return JSONResponse(status_code=429, content={"error": "Too many login attempts. Please try again later."})
     body = await request.json()
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
@@ -422,12 +490,19 @@ async def api_auth_login(request: Request):
     }
 @app.post("/api/auth/register")
 async def api_auth_register(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"register:{client_ip}", max_requests=5):
+        return JSONResponse(status_code=429, content={"error": "Too many registration attempts. Please try again later."})
     body = await request.json()
     email = body.get("email", "").strip().lower()
     password = body.get("password", "")
     name = body.get("name", "")
     if not email or not password or not name:
         return JSONResponse(status_code=400, content={"error": "Name, email, and password are required"})
+    if len(password) < 8:
+        return JSONResponse(status_code=400, content={"error": "Password must be at least 8 characters long"})
+    if not re.search(r"\d", password) or not re.search(r"[a-zA-Z]", password):
+        return JSONResponse(status_code=400, content={"error": "Password must contain at least one letter and one number"})
     existing = await fetch_user_by_email(email)
     if existing:
         return JSONResponse(status_code=409, content={"error": "User with this email already exists"})
@@ -459,17 +534,23 @@ async def api_auth_register(request: Request):
     user.pop("password_hash", None)
     return {"token": token, "user": user}
 @app.get("/api/users")
-async def api_fetch_users():
+async def api_fetch_users(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     users = await fetch_users()
     return users
 @app.get("/api/users/by-email/{email:path}")
-async def api_fetch_user_by_email(email: str):
+async def api_fetch_user_by_email(email: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     user = await fetch_user_by_email(email)
     if user:
         return user
     return JSONResponse(status_code=404, content={"error": "User not found"})
 @app.post("/api/users")
 async def api_create_user(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     body = await request.json()
     if body.get("password"):
         import bcrypt
@@ -484,23 +565,29 @@ async def api_create_user(request: Request):
     return JSONResponse(status_code=400, content={"error": "Failed to create user"})
 @app.put("/api/users/{user_id}")
 async def api_update_user(user_id: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     body = await request.json()
     ok = await update_user(user_id, body)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
 @app.delete("/api/users/{user_id}")
-async def api_delete_user(user_id: str):
+async def api_delete_user(user_id: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ok = await delete_user(user_id)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
 @app.post("/api/users/verify-password")
 async def api_verify_password(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"verify:{client_ip}"):
+        return JSONResponse(status_code=429, content={"error": "Too many attempts. Please try again later."})
     body = await request.json()
     email = body.get("email", "")
     password = body.get("password", "")
-    password_hash_legacy = body.get("passwordHash", "")
     stored_hash = await get_user_password_hash(email)
     if not stored_hash:
         return {"valid": False}
@@ -510,24 +597,32 @@ async def api_verify_password(request: Request):
             is_valid = bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
             return {"valid": is_valid}
         return {"valid": False}
-    if password_hash_legacy and stored_hash == password_hash_legacy:
-        return {"valid": True}
     return {"valid": False}
 @app.get("/api/blocked-ips")
-async def api_fetch_blocked_ips():
+async def api_fetch_blocked_ips(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ips = await fetch_blocked_ips()
     return ips
 @app.post("/api/blocked-ips")
 async def api_block_ip(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     body = await request.json()
     ip = body.get("ip_address", "")
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Invalid IP address format"})
     reason = body.get("reason", "No reason provided")
     ok = await block_ip(ip, reason)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=400, content={"success": False, "error": "Failed to block IP"})
 @app.delete("/api/blocked-ips/{ip_address}")
-async def api_unblock_ip(ip_address: str):
+async def api_unblock_ip(ip_address: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ok = await unblock_ip(ip_address)
     if ok:
         return {"success": True}
@@ -548,13 +643,14 @@ async def api_get_fmcsa_categories():
     categories = await get_fmcsa_categories()
     return {"categories": categories}
 @app.delete("/api/fmcsa-register/before/{date}")
-async def api_delete_fmcsa_before_date(date: str):
+async def api_delete_fmcsa_before_date(date: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     deleted = await delete_fmcsa_entries_before_date(date)
     return {"success": True, "deleted": deleted}
 @app.post("/api/new-ventures/scrape")
 async def api_scrape_new_ventures(request: Request):
-    user = getattr(request.state, "user", None)
-    if not user or user.get("role") != "admin":
+    if not _require_admin(request):
         return JSONResponse(status_code=403, content={"error": "Admin access required"})
     body = await request.json()
     added_date = body.get("added_date", "")
@@ -640,7 +736,9 @@ async def api_get_new_venture_detail(record_id: str):
         return record
     return JSONResponse(status_code=404, content={"error": "Record not found"})
 @app.delete("/api/new-ventures/{record_id}")
-async def api_delete_new_venture(record_id: str):
+async def api_delete_new_venture(record_id: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ok = await delete_new_venture(record_id)
     if ok:
         return {"success": True}
