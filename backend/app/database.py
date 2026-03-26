@@ -625,6 +625,12 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(f"%{filters['legal_name']}%")
         idx += 1
 
+    entity_type = filters.get("entity_type")
+    if entity_type:
+        conditions.append(f"entity_type ILIKE ${idx}")
+        params.append(f"%{entity_type}%")
+        idx += 1
+
     active = filters.get("active")
     if active == "true":
         conditions.append(f"status ILIKE ${idx}")
@@ -776,6 +782,36 @@ async def fetch_carriers(filters: dict) -> dict:
             f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
         )
         params.append("3")
+        idx += 1
+
+    if filters.get("bipd_min"):
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
+            f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric >= ${idx})"
+        )
+        params.append(int(filters["bipd_min"]))
+        idx += 1
+    if filters.get("bipd_max"):
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
+            f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric <= ${idx})"
+        )
+        params.append(int(filters["bipd_max"]))
+        idx += 1
+
+    if filters.get("ins_effective_date_from"):
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
+            f"AND ai.effective_date >= ${idx})"
+        )
+        params.append(filters["ins_effective_date_from"])
+        idx += 1
+    if filters.get("ins_effective_date_to"):
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
+            f"AND ai.effective_date <= ${idx})"
+        )
+        params.append(filters["ins_effective_date_to"])
         idx += 1
 
     if filters.get("oos_min"):
