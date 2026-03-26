@@ -483,11 +483,10 @@ async def api_auth_login(request: Request):
             "daily_limit": user["daily_limit"],
             "records_extracted_today": user["records_extracted_today"],
             "last_active": user.get("last_active", "Never"),
-            "ip_address": user.get("ip_address", "") or client_ip,
+            "ip_address": user.get("ip_address", ""),
             "is_online": user.get("is_online", False),
             "is_blocked": user.get("is_blocked", False),
         },
-        "client_ip": client_ip,
     }
 @app.post("/api/auth/register")
 async def api_auth_register(request: Request):
@@ -534,12 +533,6 @@ async def api_auth_register(request: Request):
     )
     user.pop("password_hash", None)
     return {"token": token, "user": user}
-@app.get("/api/admin/init")
-async def api_admin_init(request: Request):
-    if not _require_admin(request):
-        return JSONResponse(status_code=403, content={"error": "Admin access required"})
-    users, blocked_ips = await asyncio.gather(fetch_users(), fetch_blocked_ips())
-    return {"users": users, "blocked_ips": blocked_ips}
 @app.get("/api/users")
 async def api_fetch_users(request: Request):
     if not _require_admin(request):
