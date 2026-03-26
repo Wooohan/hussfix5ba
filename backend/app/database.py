@@ -807,11 +807,20 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(compare_max)
         idx += 1
 
+    # Helper SQL expression to safely parse effective_date from multiple formats
+    _SAFE_DATE_EXPR = (
+        "CASE "
+        "WHEN ai.effective_date ~ '^\\d{2}/\\d{2}/\\d{4}$' THEN TO_DATE(ai.effective_date, 'MM/DD/YYYY') "
+        "WHEN ai.effective_date ~ '^\\d{4}-\\d{2}-\\d{2}' THEN ai.effective_date::date "
+        "WHEN ai.effective_date ~ '^\\d{8}$' THEN TO_DATE(ai.effective_date, 'YYYYMMDD') "
+        "ELSE NULL END"
+    )
+
     if filters.get("ins_effective_date_from"):
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
             f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
-            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') >= ${idx}::date)"
+            f"AND {_SAFE_DATE_EXPR} >= ${idx}::date)"
         )
         params.append(filters["ins_effective_date_from"])
         idx += 1
@@ -819,7 +828,7 @@ async def fetch_carriers(filters: dict) -> dict:
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
             f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
-            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') <= ${idx}::date)"
+            f"AND {_SAFE_DATE_EXPR} <= ${idx}::date)"
         )
         params.append(filters["ins_effective_date_to"])
         idx += 1
