@@ -43,18 +43,12 @@ app = FastAPI(lifespan=lifespan)
 _PUBLIC_PATHS: set[str] = {
     "/health",
     "/healthz",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
     "/api/get-ip",
     "/api/auth/login",
     "/api/auth/register",
     "/api/blocked-ips/check",
 }
 _PUBLIC_PREFIXES: tuple[str, ...] = (
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/api/blocked-ips/check/",
 )
 def _get_request_ip(request: Request) -> str:
