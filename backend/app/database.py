@@ -807,30 +807,28 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(compare_max)
         idx += 1
 
-    # Helper SQL expression to safely parse effective_date from multiple formats
-    _SAFE_DATE_EXPR = (
-        "CASE "
-        "WHEN ai.effective_date ~ '^\\d{2}/\\d{2}/\\d{4}$' THEN TO_DATE(ai.effective_date, 'MM/DD/YYYY') "
-        "WHEN ai.effective_date ~ '^\\d{4}-\\d{2}-\\d{2}' THEN ai.effective_date::date "
-        "WHEN ai.effective_date ~ '^\\d{8}$' THEN TO_DATE(ai.effective_date, 'YYYYMMDD') "
-        "ELSE NULL END"
-    )
-
+    # effective_date is stored as MM/DD/YYYY (e.g. 05/18/2020)
+    # Convert input from YYYY-MM-DD to MM/DD/YYYY so both sides match
     if filters.get("ins_effective_date_from"):
+        # Convert 2026-03-01 -> 03/01/2026
+        parts = filters["ins_effective_date_from"].split("-")
+        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
-            f"AND {_SAFE_DATE_EXPR} >= ${idx}::date)"
+            f"AND ai.effective_date IS NOT NULL AND ai.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
-        params.append(filters["ins_effective_date_from"])
+        params.append(date_from_db_fmt)
         idx += 1
     if filters.get("ins_effective_date_to"):
+        parts = filters["ins_effective_date_to"].split("-")
+        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         conditions.append(
             f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date IS NOT NULL AND ai.effective_date != '' "
-            f"AND {_SAFE_DATE_EXPR} <= ${idx}::date)"
+            f"AND ai.effective_date IS NOT NULL AND ai.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
-        params.append(filters["ins_effective_date_to"])
+        params.append(date_to_db_fmt)
         idx += 1
 
     if filters.get("oos_min"):
