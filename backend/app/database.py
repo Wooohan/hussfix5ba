@@ -1018,6 +1018,7 @@ async def get_carriers_by_mc_range(start: str, end: str) -> list[dict]:
 
 def _user_row_to_dict(row) -> dict:
     d = dict(row)
+    d.pop("password_hash", None)
     for key in ("created_at", "updated_at", "blocked_at"):
         if key in d and d[key] is not None:
             d[key] = d[key].isoformat()
