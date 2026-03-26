@@ -390,6 +390,21 @@ DROP TRIGGER IF EXISTS update_new_ventures_updated_at ON new_ventures;
 CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
     FOR EACH ROW EXECUTE FUNCTION update_new_ventures_updated_at();
 -- ============================================================================
+-- ACTIVE INSURANCE TABLE
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS active_insurance (
+    prefix_docket_number VARCHAR(10),
+    ins_type_code VARCHAR(2),
+    ins_class_code VARCHAR(2),
+    max_cov_amount VARCHAR(6),
+    underl_lim_amount VARCHAR(6),
+    policy_no VARCHAR(30),
+    effective_date VARCHAR(12),
+    ins_form_code VARCHAR(4),
+    name_company VARCHAR(50)
+);
+CREATE INDEX IF NOT EXISTS idx_active_insurance_docket ON active_insurance (prefix_docket_number);
+-- ============================================================================
 -- INITIAL DATA
 -- ============================================================================
 -- Insert default admin user (only if not exists)
