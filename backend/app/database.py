@@ -1092,26 +1092,23 @@ async def create_user(user_data: dict) -> Optional[dict]:
 
 async def update_user(user_id: str, user_data: dict) -> bool:
     pool = get_pool()
+    _ALLOWED_COLUMNS = {
+        "name", "role", "plan", "daily_limit",
+        "records_extracted_today", "last_active",
+        "ip_address", "is_online", "is_blocked",
+    }
+    columns = {k: v for k, v in user_data.items() if k in _ALLOWED_COLUMNS}
+    if not columns:
+        return False
+    set_clauses = []
+    values = []
+    for idx, (col, val) in enumerate(columns.items(), start=1):
+        set_clauses.append(f"{col} = ${idx}")
+        values.append(val)
+    values.append(user_id)
+    query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${len(values)}"
     try:
-        result = await pool.execute(
-            """
-            UPDATE users SET
-                name = $1, role = $2, plan = $3, daily_limit = $4,
-                records_extracted_today = $5, last_active = $6,
-                ip_address = $7, is_online = $8, is_blocked = $9
-            WHERE user_id = $10
-            """,
-            user_data.get("name"),
-            user_data.get("role"),
-            user_data.get("plan"),
-            user_data.get("daily_limit"),
-            user_data.get("records_extracted_today"),
-            user_data.get("last_active"),
-            user_data.get("ip_address"),
-            user_data.get("is_online", False),
-            user_data.get("is_blocked", False),
-            user_id,
-        )
+        result = await pool.execute(query, *values)
         return not result.endswith("0")
     except Exception as e:
         print(f"[DB] Error updating user {user_id}: {e}")
