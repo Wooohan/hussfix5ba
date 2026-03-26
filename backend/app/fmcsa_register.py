@@ -91,9 +91,9 @@ async def scrape_fmcsa_register(date_str: Optional[str] = None) -> dict:
             "entries": unique_entries,
         }
     except Exception as e:
+        print(f"[FMCSA Register] Scrape error: {e}")
         return {
             "success": False,
             "error": "Failed to scrape FMCSA register data",
-            "details": str(e),
             "entries": [],
         }
