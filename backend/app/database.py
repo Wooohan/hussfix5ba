@@ -728,7 +728,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["drivers_max"]))
         idx += 1
 
-    _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY"}
+    _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
 
     if filters.get("insurance_required"):
         ins_types = filters["insurance_required"]
@@ -773,15 +773,28 @@ async def fetch_carriers(filters: dict) -> dict:
     bond_on_file = filters.get("bond_on_file")
     if bond_on_file == "1":
         conditions.append(
-            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND (ih.ins_type_desc = ${idx} OR ih.ins_type_desc = 'TRUST FUND') AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
         params.append("SURETY")
         idx += 1
     elif bond_on_file == "0":
         conditions.append(
-            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND (ih.ins_type_desc = ${idx} OR ih.ins_type_desc = 'TRUST FUND') AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
         params.append("SURETY")
+        idx += 1
+    trust_fund_on_file = filters.get("trust_fund_on_file")
+    if trust_fund_on_file == "1":
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+        )
+        params.append("TRUST FUND")
+        idx += 1
+    elif trust_fund_on_file == "0":
+        conditions.append(
+            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+        )
+        params.append("TRUST FUND")
         idx += 1
 
     if filters.get("bipd_min"):
@@ -827,6 +840,29 @@ async def fetch_carriers(filters: dict) -> dict:
             f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
             f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
             f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
+        )
+        params.append(date_to_db_fmt)
+        idx += 1
+
+    # cancl_effective_date is stored as MM/DD/YYYY (e.g. 05/31/2026)
+    # Convert input from YYYY-MM-DD to MM/DD/YYYY so both sides match
+    if filters.get("ins_cancellation_date_from"):
+        parts = filters["ins_cancellation_date_from"].split("-")
+        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' AND ih.cancl_effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
+        )
+        params.append(date_from_db_fmt)
+        idx += 1
+    if filters.get("ins_cancellation_date_to"):
+        parts = filters["ins_cancellation_date_to"].split("-")
+        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' AND ih.cancl_effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_to_db_fmt)
         idx += 1
