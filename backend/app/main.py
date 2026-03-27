@@ -31,7 +31,7 @@ from app.database import (
     get_fmcsa_extracted_dates, get_fmcsa_categories, delete_fmcsa_entries_before_date,
     save_new_venture_entries, fetch_new_ventures, fetch_new_venture_by_id,
     get_new_venture_count, get_new_venture_scraped_dates, delete_new_venture,
-    fetch_active_insurance,
+    fetch_insurance_history,
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -762,7 +762,7 @@ async def api_delete_new_venture(record_id: str, request: Request):
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "Record not found"})
-@app.get("/api/carriers/{mc_number}/active-insurance")
-async def api_get_active_insurance(mc_number: str):
-    policies = await fetch_active_insurance(mc_number)
+@app.get("/api/carriers/{mc_number}/insurance-history")
+async def api_get_insurance_history(mc_number: str):
+    policies = await fetch_insurance_history(mc_number)
     return {"success": True, "mc_number": mc_number, "policies": policies, "count": len(policies)}
