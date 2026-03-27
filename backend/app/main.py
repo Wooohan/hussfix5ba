@@ -321,6 +321,9 @@ async def api_fetch_carriers(
     bipd_on_file: str = Query(None),
     cargo_on_file: str = Query(None),
     bond_on_file: str = Query(None),
+    trust_fund_on_file: str = Query(None),
+    ins_cancellation_date_from: str = Query(None),
+    ins_cancellation_date_to: str = Query(None),
     years_in_business_min: str = Query(None),
     years_in_business_max: str = Query(None),
     oos_min: str = Query(None),
@@ -364,6 +367,9 @@ async def api_fetch_carriers(
     if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
     if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
     if bond_on_file: filters["bond_on_file"] = bond_on_file
+    if trust_fund_on_file: filters["trust_fund_on_file"] = trust_fund_on_file
+    if ins_cancellation_date_from: filters["ins_cancellation_date_from"] = ins_cancellation_date_from
+    if ins_cancellation_date_to: filters["ins_cancellation_date_to"] = ins_cancellation_date_to
     if years_in_business_min: filters["years_in_business_min"] = years_in_business_min
     if years_in_business_max: filters["years_in_business_max"] = years_in_business_max
     if oos_min: filters["oos_min"] = oos_min
