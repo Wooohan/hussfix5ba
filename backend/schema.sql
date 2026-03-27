@@ -390,20 +390,23 @@ DROP TRIGGER IF EXISTS update_new_ventures_updated_at ON new_ventures;
 CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
     FOR EACH ROW EXECUTE FUNCTION update_new_ventures_updated_at();
 -- ============================================================================
--- ACTIVE INSURANCE TABLE
+-- INSURANCE HISTORY TABLE (includes active + cancelled policies)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS active_insurance (
-    prefix_docket_number VARCHAR(10),
-    ins_type_code VARCHAR(2),
-    ins_class_code VARCHAR(2),
-    max_cov_amount VARCHAR(6),
-    underl_lim_amount VARCHAR(6),
-    policy_no VARCHAR(30),
-    effective_date VARCHAR(12),
-    ins_form_code VARCHAR(4),
-    name_company VARCHAR(50)
+CREATE TABLE IF NOT EXISTS insurance_history (
+    id SERIAL PRIMARY KEY,
+    docket_number VARCHAR(20),
+    dot_number VARCHAR(20),
+    ins_form_code VARCHAR(10),
+    ins_type_desc VARCHAR(50),
+    name_company VARCHAR(100),
+    policy_no VARCHAR(50),
+    trans_date VARCHAR(15),
+    underl_lim_amount VARCHAR(15),
+    max_cov_amount VARCHAR(15),
+    effective_date VARCHAR(15),
+    cancl_effective_date VARCHAR(15)
 );
-CREATE INDEX IF NOT EXISTS idx_active_insurance_docket ON active_insurance (prefix_docket_number);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history (docket_number);
 -- ============================================================================
 -- INITIAL DATA
 -- ============================================================================
