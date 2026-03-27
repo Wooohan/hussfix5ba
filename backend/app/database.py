@@ -102,7 +102,7 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
 
-CREATE INDEX IF NOT EXISTS idx_active_insurance_docket ON active_insurance(prefix_docket_number);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
 
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
@@ -560,10 +560,7 @@ def _parse_jsonb(value) -> Optional[object]:
     return value
 
 
-_INS_TYPE_LABELS = {"1": "BI&PD", "2": "CARGO", "3": "BOND"}
-
-
-def _format_active_insurance(raw_filings) -> list[dict]:
+def _format_insurance_history(raw_filings) -> list[dict]:
     if not raw_filings:
         return []
     results = []
@@ -574,15 +571,18 @@ def _format_active_insurance(raw_filings) -> list[dict]:
             coverage = f"${amount_int:,}"
         except (ValueError, TypeError):
             coverage = raw_amount or "N/A"
-        type_code = (row.get("ins_type_code") or "").strip()
+        cancl = (row.get("cancl_effective_date") or "").strip()
         results.append({
-            "type": _INS_TYPE_LABELS.get(type_code, type_code),
-            "class": (row.get("ins_class_code") or "").strip(),
+            "type": (row.get("ins_type_desc") or "").strip(),
             "coverageAmount": coverage,
             "policyNumber": (row.get("policy_no") or "").strip(),
             "effectiveDate": (row.get("effective_date") or "").strip(),
             "carrier": (row.get("name_company") or "").strip(),
             "formCode": (row.get("ins_form_code") or "").strip(),
+            "transDate": (row.get("trans_date") or "").strip(),
+            "underlLimAmount": (row.get("underl_lim_amount") or "").strip(),
+            "canclEffectiveDate": cancl,
+            "status": "Cancelled" if cancl else "Active",
         })
     return results
 
@@ -592,9 +592,9 @@ def _carrier_row_to_dict(row) -> dict:
     for key in ("basic_scores", "oos_rates", "insurance_policies", "inspections", "crashes"):
         if key in d:
             d[key] = _parse_jsonb(d[key])
-    if "active_insurance_filings" in d:
-        raw = _parse_jsonb(d["active_insurance_filings"])
-        d["active_insurance_filings"] = _format_active_insurance(raw)
+    if "insurance_history_filings" in d:
+        raw = _parse_jsonb(d["insurance_history_filings"])
+        d["insurance_history_filings"] = _format_insurance_history(raw)
     for key in ("created_at", "updated_at"):
         if key in d and d[key] is not None:
             d[key] = d[key].isoformat()
@@ -728,7 +728,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["drivers_max"]))
         idx += 1
 
-    _INS_TYPE_CODE = {"BI&PD": "1", "CARGO": "2", "BOND": "3"}
+    _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY"}
 
     if filters.get("insurance_required"):
         ins_types = filters["insurance_required"]
@@ -736,52 +736,52 @@ async def fetch_carriers(filters: dict) -> dict:
             ins_types = ins_types.split(",")
         or_clauses = []
         for itype in ins_types:
-            code = _INS_TYPE_CODE.get(itype, itype)
+            pattern = _INS_TYPE_PATTERN.get(itype, itype)
             or_clauses.append(
-                f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+                f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc LIKE ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
             )
-            params.append(code)
+            params.append(pattern)
             idx += 1
         conditions.append(f"({' OR '.join(or_clauses)})")
 
     bipd_on_file = filters.get("bipd_on_file")
     if bipd_on_file == "1":
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc LIKE ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("1")
+        params.append("BIPD%")
         idx += 1
     elif bipd_on_file == "0":
         conditions.append(
-            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc LIKE ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("1")
+        params.append("BIPD%")
         idx += 1
     cargo_on_file = filters.get("cargo_on_file")
     if cargo_on_file == "1":
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("2")
+        params.append("CARGO")
         idx += 1
     elif cargo_on_file == "0":
         conditions.append(
-            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND ih.ins_type_desc = ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("2")
+        params.append("CARGO")
         idx += 1
     bond_on_file = filters.get("bond_on_file")
     if bond_on_file == "1":
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND (ih.ins_type_desc = ${idx} OR ih.ins_type_desc = 'TRUST FUND') AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("3")
+        params.append("SURETY")
         idx += 1
     elif bond_on_file == "0":
         conditions.append(
-            f"NOT EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number AND ai.ins_type_code = ${idx})"
+            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number AND (ih.ins_type_desc = ${idx} OR ih.ins_type_desc = 'TRUST FUND') AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
         )
-        params.append("3")
+        params.append("SURETY")
         idx += 1
 
     if filters.get("bipd_min"):
@@ -790,8 +790,8 @@ async def fetch_carriers(filters: dict) -> dict:
         # If the user typed a value >= 10000, assume they meant full dollars and convert to thousands
         compare_min = raw_min // 1000 if raw_min >= 10000 else raw_min
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric >= ${idx})"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric >= ${idx})"
         )
         params.append(compare_min)
         idx += 1
@@ -801,8 +801,8 @@ async def fetch_carriers(filters: dict) -> dict:
         # If the user typed a value >= 10000, assume they meant full dollars and convert to thousands
         compare_max = raw_max // 1000 if raw_max >= 10000 else raw_max
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND NULLIF(REPLACE(ai.max_cov_amount, ',', ''), '')::numeric <= ${idx})"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric <= ${idx})"
         )
         params.append(compare_max)
         idx += 1
@@ -814,9 +814,9 @@ async def fetch_carriers(filters: dict) -> dict:
         parts = filters["ins_effective_date_from"].split("-")
         date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date IS NOT NULL AND ai.effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_from_db_fmt)
         idx += 1
@@ -824,9 +824,9 @@ async def fetch_carriers(filters: dict) -> dict:
         parts = filters["ins_effective_date_to"].split("-")
         date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         conditions.append(
-            f"EXISTS (SELECT 1 FROM active_insurance ai WHERE ai.prefix_docket_number = 'MC' || mc_number "
-            f"AND ai.effective_date IS NOT NULL AND ai.effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ai.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_to_db_fmt)
         idx += 1
@@ -912,19 +912,20 @@ async def fetch_carriers(filters: dict) -> dict:
         SELECT c.*,
           COALESCE(
             (SELECT jsonb_agg(jsonb_build_object(
-              'ins_type_code', ai.ins_type_code,
-              'ins_class_code', ai.ins_class_code,
-              'max_cov_amount', ai.max_cov_amount,
-              'underl_lim_amount', ai.underl_lim_amount,
-              'policy_no', ai.policy_no,
-              'effective_date', ai.effective_date,
-              'ins_form_code', ai.ins_form_code,
-              'name_company', ai.name_company
-            ) ORDER BY ai.effective_date DESC)
-            FROM active_insurance ai
-            WHERE ai.prefix_docket_number = 'MC' || c.mc_number
+              'ins_type_desc', ih.ins_type_desc,
+              'max_cov_amount', ih.max_cov_amount,
+              'underl_lim_amount', ih.underl_lim_amount,
+              'policy_no', ih.policy_no,
+              'effective_date', ih.effective_date,
+              'ins_form_code', ih.ins_form_code,
+              'name_company', ih.name_company,
+              'trans_date', ih.trans_date,
+              'cancl_effective_date', ih.cancl_effective_date
+            ) ORDER BY ih.effective_date DESC)
+            FROM insurance_history ih
+            WHERE ih.docket_number = 'MC' || c.mc_number
             ), '[]'::jsonb
-          ) AS active_insurance_filings
+          ) AS insurance_history_filings
         FROM carriers c
         WHERE {where}
         ORDER BY c.created_at DESC
@@ -1596,20 +1597,17 @@ async def delete_new_venture(record_id: str) -> bool:
         return False
 
 
-_INS_TYPE_MAP = {"1": "BI&PD", "2": "CARGO", "3": "BOND"}
-
-
-async def fetch_active_insurance(mc_number: str) -> list[dict]:
+async def fetch_insurance_history(mc_number: str) -> list[dict]:
     pool = get_pool()
     docket = f"MC{mc_number}"
     try:
         rows = await pool.fetch(
             """
-            SELECT prefix_docket_number, ins_type_code, ins_class_code,
-                   max_cov_amount, underl_lim_amount, policy_no,
-                   effective_date, ins_form_code, name_company
-            FROM active_insurance
-            WHERE prefix_docket_number = $1
+            SELECT docket_number, dot_number, ins_form_code, ins_type_desc,
+                   name_company, policy_no, trans_date, underl_lim_amount,
+                   max_cov_amount, effective_date, cancl_effective_date
+            FROM insurance_history
+            WHERE docket_number = $1
             ORDER BY effective_date DESC
             """,
             docket,
@@ -1622,17 +1620,20 @@ async def fetch_active_insurance(mc_number: str) -> list[dict]:
                 coverage = f"${amount_int:,}"
             except (ValueError, TypeError):
                 coverage = raw_amount or "N/A"
-            type_code = (row["ins_type_code"] or "").strip()
+            cancl = (row["cancl_effective_date"] or "").strip()
             results.append({
-                "type": _INS_TYPE_MAP.get(type_code, type_code),
-                "class": (row["ins_class_code"] or "").strip(),
+                "type": (row["ins_type_desc"] or "").strip(),
                 "coverageAmount": coverage,
                 "policyNumber": (row["policy_no"] or "").strip(),
                 "effectiveDate": (row["effective_date"] or "").strip(),
                 "carrier": (row["name_company"] or "").strip(),
                 "formCode": (row["ins_form_code"] or "").strip(),
+                "transDate": (row["trans_date"] or "").strip(),
+                "underlLimAmount": (row["underl_lim_amount"] or "").strip(),
+                "canclEffectiveDate": cancl,
+                "status": "Cancelled" if cancl else "Active",
             })
         return results
     except Exception as e:
-        print(f"[DB] Error fetching active insurance for MC {mc_number}: {e}")
+        print(f"[DB] Error fetching insurance history for MC {mc_number}: {e}")
         return []
