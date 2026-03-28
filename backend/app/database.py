@@ -934,6 +934,141 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["inspections_max"]))
         idx += 1
 
+    # ── Insurance Company filter ──────────────────────────────────────────
+    _INSURANCE_COMPANY_PATTERNS: dict[str, list[str]] = {
+        "GREAT WEST CASUALTY": ["GREAT WEST%"],
+        "UNITED FINANCIAL CASUALTY": ["UNITED FINANCIAL%"],
+        "GEICO MARINE": ["GEICO MARINE%"],
+        "NORTHLAND INSURANCE": ["NORTHLAND%"],
+        "ARTISAN & TRUCKERS": ["ARTISAN%", "TRUCKERS CASUALTY%"],
+        "CANAL INSURANCE": ["CANAL INS%"],
+        "PROGRESSIVE": ["PROGRESSIVE%"],
+        "BERKSHIRE HATHAWAY": ["BERKSHIRE%"],
+        "OLD REPUBLIC": ["OLD REPUBLIC%"],
+        "SENTRY": ["SENTRY%"],
+        "TRAVELERS": ["TRAVELERS%"],
+    }
+    if filters.get("insurance_company"):
+        companies = filters["insurance_company"]
+        if isinstance(companies, str):
+            companies = companies.split(",")
+        or_clauses = []
+        for company in companies:
+            company_upper = company.strip().upper()
+            patterns = _INSURANCE_COMPANY_PATTERNS.get(company_upper, [f"{company_upper}%"])
+            for pattern in patterns:
+                or_clauses.append(
+                    f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+                    f"AND UPPER(ih.name_company) LIKE ${idx} "
+                    f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
+                    f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE))"
+                )
+                params.append(pattern)
+                idx += 1
+        conditions.append(f"({' OR '.join(or_clauses)})")
+
+    # ── Renewal Policy Monthly filter ─────────────────────────────────────
+    # Renewal date = next anniversary of effective_date (annual renewal).
+    # "1" means from today to end of next month, "2" means to end of month+2, etc.
+    # Only active policies (cancl_effective_date is null/empty or >= today).
+    if filters.get("renewal_policy_months"):
+        months = int(filters["renewal_policy_months"])
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
+            f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE) "
+            f"AND ("
+            f"  CASE "
+            f"    WHEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"         >= CURRENT_DATE "
+            f"    THEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"    ELSE MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"  END"
+            f") BETWEEN CURRENT_DATE AND (DATE_TRUNC('MONTH', CURRENT_DATE + MAKE_INTERVAL(months => ${idx})) + INTERVAL '1 MONTH - 1 DAY')::date"
+            f")"
+        )
+        params.append(months)
+        idx += 1
+
+    # ── Renewal Policy Date range filter ──────────────────────────────────
+    if filters.get("renewal_date_from"):
+        parts = filters["renewal_date_from"].split("-")
+        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
+            f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE) "
+            f"AND ("
+            f"  CASE "
+            f"    WHEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"         >= CURRENT_DATE "
+            f"    THEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"    ELSE MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"  END"
+            f") >= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f")"
+        )
+        params.append(date_from_db_fmt)
+        idx += 1
+    if filters.get("renewal_date_to"):
+        parts = filters["renewal_date_to"].split("-")
+        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE ih.docket_number = 'MC' || mc_number "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
+            f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE) "
+            f"AND ("
+            f"  CASE "
+            f"    WHEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"         >= CURRENT_DATE "
+            f"    THEN MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"    ELSE MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, "
+            f"           EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int + 1, "
+            f"             EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1)) + INTERVAL '1 MONTH - 1 DAY'))::int)) "
+            f"  END"
+            f") <= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f")"
+        )
+        params.append(date_to_db_fmt)
+        idx += 1
+
     where = " AND ".join(conditions) if conditions else "TRUE"
 
     is_filtered = len(conditions) > 0
