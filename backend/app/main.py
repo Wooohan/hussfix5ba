@@ -338,6 +338,10 @@ async def api_fetch_carriers(
     toway_max: str = Query(None),
     inspections_min: str = Query(None),
     inspections_max: str = Query(None),
+    insurance_company: str = Query(None),
+    renewal_policy_months: str = Query(None),
+    renewal_date_from: str = Query(None),
+    renewal_date_to: str = Query(None),
     limit: int = Query(None),
     offset: int = Query(0),
 ):
@@ -384,6 +388,10 @@ async def api_fetch_carriers(
     if toway_max: filters["toway_max"] = toway_max
     if inspections_min: filters["inspections_min"] = inspections_min
     if inspections_max: filters["inspections_max"] = inspections_max
+    if insurance_company: filters["insurance_company"] = insurance_company
+    if renewal_policy_months: filters["renewal_policy_months"] = renewal_policy_months
+    if renewal_date_from: filters["renewal_date_from"] = renewal_date_from
+    if renewal_date_to: filters["renewal_date_to"] = renewal_date_to
     if offset > 0: filters["offset"] = offset
     if limit is not None:
         filters["limit"] = limit
