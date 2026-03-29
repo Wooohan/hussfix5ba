@@ -1090,53 +1090,31 @@ async def fetch_carriers(filters: dict) -> dict:
 
     _LIST_COLS = "c.*"
 
-    # Detect whether any insurance-related filter is active.
-    # If not, skip the expensive LEFT JOIN LATERAL on insurance_history.
-    _INS_FILTER_KEYS = (
-        "insurance_required", "bipd_on_file", "cargo_on_file", "bond_on_file",
-        "trust_fund_on_file", "bipd_min", "bipd_max", "ins_effective_date_from",
-        "ins_effective_date_to", "ins_cancellation_date_from",
-        "ins_cancellation_date_to", "insurance_company",
-        "renewal_policy_months", "renewal_date_from", "renewal_date_to",
-    )
-    needs_insurance_join = any(filters.get(k) for k in _INS_FILTER_KEYS)
-
-    if needs_insurance_join:
-        # Use LEFT JOIN LATERAL to aggregate insurance_history per carrier
-        # in a single pass instead of a correlated subquery per row.
-        query = f"""
-            SELECT {_LIST_COLS},
-              COALESCE(ih_agg.filings, '[]'::jsonb) AS insurance_history_filings
-            FROM carriers c
-            LEFT JOIN LATERAL (
-                SELECT jsonb_agg(jsonb_build_object(
-                  'ins_type_desc', ih.ins_type_desc,
-                  'max_cov_amount', ih.max_cov_amount,
-                  'underl_lim_amount', ih.underl_lim_amount,
-                  'policy_no', ih.policy_no,
-                  'effective_date', ih.effective_date,
-                  'ins_form_code', ih.ins_form_code,
-                  'name_company', ih.name_company,
-                  'trans_date', ih.trans_date,
-                  'cancl_effective_date', ih.cancl_effective_date
-                ) ORDER BY ih.effective_date DESC) AS filings
-                FROM insurance_history ih
-                WHERE ih.docket_number = 'MC' || c.mc_number
-            ) ih_agg ON true
-            WHERE {where}
-            ORDER BY c.created_at DESC
-            LIMIT {limit_val} OFFSET {offset_val}
-        """
-    else:
-        # No insurance filters – skip the expensive JOIN entirely.
-        query = f"""
-            SELECT {_LIST_COLS},
-              '[]'::jsonb AS insurance_history_filings
-            FROM carriers c
-            WHERE {where}
-            ORDER BY c.created_at DESC
-            LIMIT {limit_val} OFFSET {offset_val}
-        """
+    # Use LEFT JOIN LATERAL to aggregate insurance_history per carrier
+    # in a single pass instead of a correlated subquery per row.
+    query = f"""
+        SELECT {_LIST_COLS},
+          COALESCE(ih_agg.filings, '[]'::jsonb) AS insurance_history_filings
+        FROM carriers c
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(jsonb_build_object(
+              'ins_type_desc', ih.ins_type_desc,
+              'max_cov_amount', ih.max_cov_amount,
+              'underl_lim_amount', ih.underl_lim_amount,
+              'policy_no', ih.policy_no,
+              'effective_date', ih.effective_date,
+              'ins_form_code', ih.ins_form_code,
+              'name_company', ih.name_company,
+              'trans_date', ih.trans_date,
+              'cancl_effective_date', ih.cancl_effective_date
+            ) ORDER BY ih.effective_date DESC) AS filings
+            FROM insurance_history ih
+            WHERE ih.docket_number = 'MC' || c.mc_number
+        ) ih_agg ON true
+        WHERE {where}
+        ORDER BY c.created_at DESC
+        LIMIT {limit_val} OFFSET {offset_val}
+    """
 
     count_query = f"""
         SELECT COUNT(*) as cnt FROM carriers
