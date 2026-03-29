@@ -6,6 +6,7 @@ from collections import defaultdict
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
@@ -125,6 +126,7 @@ class IPBlockMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(AuthMiddleware)
 app.add_middleware(IPBlockMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 _cors_raw = os.getenv("CORS_ORIGINS", "")
 if not _cors_raw:
     import warnings
