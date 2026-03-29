@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import asyncpg
 from typing import Optional
 
@@ -87,10 +88,17 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
 );
 
 -- ── Indexes ─────────────────────────────────────────────────────────────────
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_created_at ON carriers(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_carriers_status ON carriers(status);
+
+-- Trigram indexes for fast ILIKE text search on carriers
+CREATE INDEX IF NOT EXISTS idx_carriers_legal_name_trgm ON carriers USING gin (legal_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_carriers_mc_number_trgm ON carriers USING gin (mc_number gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_trgm ON carriers USING gin (dot_number gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_fmcsa_register_number ON fmcsa_register(number);
 CREATE INDEX IF NOT EXISTS idx_fmcsa_register_date_fetched ON fmcsa_register(date_fetched DESC);
@@ -103,6 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
 
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type ON insurance_history(docket_number, ins_type_desc);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_cancl ON insurance_history(docket_number, cancl_effective_date);
 
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
@@ -308,8 +318,7 @@ CREATE INDEX IF NOT EXISTS idx_new_ventures_email ON new_ventures(email_address)
 CREATE INDEX IF NOT EXISTS idx_new_ventures_hm_ind ON new_ventures(hm_ind);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_carrier_op ON new_ventures(carrier_operation);
 
--- Trigram indexes for fast ILIKE text search on large tables
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- Trigram indexes for fast ILIKE text search on new_ventures
 CREATE INDEX IF NOT EXISTS idx_new_ventures_name_trgm ON new_ventures USING gin (name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_name_dba_trgm ON new_ventures USING gin (name_dba gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_new_ventures_dot_trgm ON new_ventures USING gin (dot_number gin_trgm_ops);
@@ -1073,16 +1082,22 @@ async def fetch_carriers(filters: dict) -> dict:
 
     is_filtered = len(conditions) > 0
     if is_filtered:
-        limit_val = int(filters.get("limit", 10000))
+        limit_val = int(filters.get("limit", 500))
     else:
         limit_val = int(filters.get("limit", 200))
 
     offset_val = int(filters.get("offset", 0))
 
+    _LIST_COLS = "c.*"
+
+    # Use LEFT JOIN LATERAL to aggregate insurance_history per carrier
+    # in a single pass instead of a correlated subquery per row.
     query = f"""
-        SELECT c.*,
-          COALESCE(
-            (SELECT jsonb_agg(jsonb_build_object(
+        SELECT {_LIST_COLS},
+          COALESCE(ih_agg.filings, '[]'::jsonb) AS insurance_history_filings
+        FROM carriers c
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(jsonb_build_object(
               'ins_type_desc', ih.ins_type_desc,
               'max_cov_amount', ih.max_cov_amount,
               'underl_lim_amount', ih.underl_lim_amount,
@@ -1092,12 +1107,10 @@ async def fetch_carriers(filters: dict) -> dict:
               'name_company', ih.name_company,
               'trans_date', ih.trans_date,
               'cancl_effective_date', ih.cancl_effective_date
-            ) ORDER BY ih.effective_date DESC)
+            ) ORDER BY ih.effective_date DESC) AS filings
             FROM insurance_history ih
             WHERE ih.docket_number = 'MC' || c.mc_number
-            ), '[]'::jsonb
-          ) AS insurance_history_filings
-        FROM carriers c
+        ) ih_agg ON true
         WHERE {where}
         ORDER BY c.created_at DESC
         LIMIT {limit_val} OFFSET {offset_val}
@@ -1109,8 +1122,11 @@ async def fetch_carriers(filters: dict) -> dict:
     """
 
     try:
-        rows = await pool.fetch(query, *params)
-        count_row = await pool.fetchrow(count_query, *params)
+        # Run data + count queries in parallel for ~2x speedup
+        rows, count_row = await asyncio.gather(
+            pool.fetch(query, *params),
+            pool.fetchrow(count_query, *params),
+        )
         filtered_count = count_row["cnt"] if count_row else 0
         return {
             "data": [_carrier_row_to_dict(row) for row in rows],
