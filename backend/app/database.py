@@ -12,7 +12,7 @@ if not DATABASE_URL:
 
 _pool: Optional[asyncpg.Pool] = None
 
-# ── Dashboard stats cache ────────────────────────────────────────────────────
+# ── Dashboard stat cache ────────────────────────────────────────────────────
 _dashboard_cache: Optional[dict] = None
 _dashboard_cache_ts: float = 0.0
 _DASHBOARD_CACHE_TTL = 300  # 5 minutes
