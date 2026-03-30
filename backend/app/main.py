@@ -398,9 +398,7 @@ async def api_fetch_carriers(
     if limit is not None:
         filters["limit"] = limit
     else:
-        has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
-        if not has_filters:
-            filters["limit"] = 200
+        filters["limit"] = 500
     result = await fetch_carriers(filters)
     return result
 @app.post("/api/carriers")
@@ -751,9 +749,7 @@ async def api_fetch_new_ventures(
     if limit is not None:
         filters["limit"] = limit
     else:
-        has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
-        if not has_filters:
-            filters["limit"] = 200
+        filters["limit"] = 500
     result = await fetch_new_ventures(filters)
     return result
 @app.get("/api/new-ventures/count")
