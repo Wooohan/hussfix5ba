@@ -613,12 +613,20 @@ _CARSHIP_MAP = {
 
 
 def _build_mc_number(d: dict) -> str:
-    """Build a display MC/MX number from docket fields."""
-    prefix = d.get("docket1prefix") or ""
-    number = d.get("docket1") or ""
-    if prefix and number:
-        return f"{prefix}-{number}"
-    return number
+    """Build a display MC/MX/FF number from all docket fields.
+
+    Returns a comma-separated list of all docket numbers, e.g.
+    'MC-1418760, FF-26167'.
+    """
+    parts = []
+    for pfx_key, num_key in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
+        prefix = d.get(pfx_key) or ""
+        number = d.get(num_key) or ""
+        if prefix and number:
+            parts.append(f"{prefix}-{number}")
+        elif number:
+            parts.append(number)
+    return ", ".join(parts)
 
 
 def _build_address(street: str, city: str, state: str, zipcode: str, country: str = "") -> str:
@@ -701,6 +709,11 @@ def _carrier_row_to_dict(row) -> dict:
     status_code = d.get("status_code") or ""
     status_label = _STATUS_CODE_MAP.get(status_code, status_code)
 
+    # Operating Authority status (from docket1_status_code)
+    docket_status_code = d.get("docket1_status_code") or ""
+    _DOCKET_STATUS_MAP = {"A": "AUTHORIZED", "I": "NOT AUTHORIZED", "P": "PENDING"}
+    docket_status = _DOCKET_STATUS_MAP.get(docket_status_code, "NOT AUTHORIZED")
+
     mcs150_date = _format_mcs150_date(d.get("mcs150_date") or "")
     mileage = d.get("mcs150_mileage") or ""
     mileage_year = d.get("mcs150_mileage_year") or ""
@@ -728,6 +741,7 @@ def _carrier_row_to_dict(row) -> dict:
         "entity_type": entity_type,
         "status": status_label,
         "status_code": status_code,
+        "authority_status": docket_status,
         "email": d.get("email_address") or "",
         "phone": d.get("phone") or "",
         "fax": d.get("fax") or "",
@@ -777,13 +791,34 @@ async def fetch_carriers(filters: dict) -> dict:
     idx = 1
 
     if filters.get("mc_number"):
-        conditions.append(f"c.docket1 ILIKE ${idx}")
-        params.append(f"%{filters['mc_number']}%")
-        idx += 1
+        mc_raw = filters["mc_number"].strip().upper()
+        # Parse prefix if provided (e.g. "MC1418760" -> prefix="MC", number="1418760")
+        mc_prefix = ""
+        mc_num = mc_raw
+        for pfx in ("MC", "MX", "FF"):
+            if mc_raw.startswith(pfx):
+                mc_prefix = pfx
+                mc_num = mc_raw[len(pfx):].lstrip("-").strip()
+                break
+        # Search across all 3 docket fields (docket1, docket2, docket3)
+        docket_clauses = []
+        if mc_prefix:
+            for dk_pfx, dk_num in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
+                docket_clauses.append(f"(c.{dk_pfx} = ${idx} AND c.{dk_num} = ${idx + 1})")
+                params.extend([mc_prefix, mc_num])
+                idx += 2
+        else:
+            for dk_num in ["docket1", "docket2", "docket3"]:
+                docket_clauses.append(f"c.{dk_num} = ${idx}")
+                params.append(mc_num)
+                idx += 1
+        conditions.append(f"({' OR '.join(docket_clauses)})")
 
     if filters.get("dot_number"):
-        conditions.append(f"c.dot_number::text ILIKE ${idx}")
-        params.append(f"%{filters['dot_number']}%")
+        dot_val = filters["dot_number"].strip()
+        # Exact match on dot_number to use the idx_cc_dot_number index
+        conditions.append(f"c.dot_number = ${idx}::bigint")
+        params.append(int(dot_val))
         idx += 1
 
     if filters.get("legal_name"):
@@ -1167,9 +1202,13 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(date_to_db_fmt)
         idx += 1
 
+    # Default to active carriers when no filters are applied
+    is_filtered = len(conditions) > 0
+    if not is_filtered:
+        conditions.append("c.status_code = 'A'")
+
     where = " AND ".join(conditions) if conditions else "TRUE"
 
-    is_filtered = len(conditions) > 0
     if is_filtered:
         limit_val = int(filters.get("limit", 500))
     else:
@@ -1208,10 +1247,18 @@ async def fetch_carriers(filters: dict) -> dict:
         WHERE {where}
     """
 
+    # For unfiltered queries (default active-only), use a fast estimate
+    # to avoid expensive COUNT(*) on millions of rows
+    fast_count_query = """
+        SELECT reltuples::bigint AS cnt
+        FROM pg_class WHERE relname = 'carriers'
+    """
+
     try:
+        use_fast_count = not is_filtered
         rows, count_row = await asyncio.gather(
             pool.fetch(query, *params),
-            pool.fetchrow(count_query, *params),
+            pool.fetchrow(fast_count_query) if use_fast_count else pool.fetchrow(count_query, *params),
         )
         filtered_count = count_row["cnt"] if count_row else 0
         return {
