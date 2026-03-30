@@ -83,6 +83,15 @@ CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(doc
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type ON insurance_history(docket_number, ins_type_desc);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_cancl ON insurance_history(docket_number, cancl_effective_date);
 
+-- Composite indexes for common carrier search filter patterns
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status ON carriers(docket1_status_code);
+CREATE INDEX IF NOT EXISTS idx_carriers_status_id ON carriers(status_code, id DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status_id ON carriers(docket1_status_code, id DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_cargo_genfreight ON carriers(crgo_genfreight) WHERE crgo_genfreight = 'X';
+CREATE INDEX IF NOT EXISTS idx_carriers_hm_ind ON carriers(hm_ind) WHERE hm_ind = 'Y';
+CREATE INDEX IF NOT EXISTS idx_carriers_carrier_op ON carriers(carrier_operation);
+CREATE INDEX IF NOT EXISTS idx_carriers_phy_state ON carriers(phy_state);
+
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
@@ -774,10 +783,9 @@ def _carrier_row_to_dict(row) -> dict:
         "crashes": None,
     }
 
-    # Insurance history filings aggregated via LEFT JOIN LATERAL
-    if "insurance_history_filings" in d:
-        raw = _parse_jsonb(d["insurance_history_filings"])
-        result["insurance_history_filings"] = _format_insurance_history(raw)
+    # Insurance history filings – populated separately via batch fetch
+    # in fetch_carriers() after this function returns.
+    result["insurance_history_filings"] = []
 
     return result
 
@@ -837,9 +845,11 @@ async def fetch_carriers(filters: dict) -> dict:
 
     active = filters.get("active")
     if active == "true":
-        conditions.append("c.status_code = 'A'")
+        # "Active" means Operating Authority is Authorized
+        conditions.append("c.docket1_status_code = 'A'")
     elif active == "false":
-        conditions.append("c.status_code != 'A'")
+        # "Not Active" means Operating Authority is Not Authorized
+        conditions.append("(c.docket1_status_code IS NULL OR c.docket1_status_code != 'A')")
 
     if filters.get("years_in_business_min"):
         conditions.append(
@@ -1216,53 +1226,109 @@ async def fetch_carriers(filters: dict) -> dict:
 
     offset_val = int(filters.get("offset", 0))
 
-    _LIST_COLS = "c.*"
+    # Select only the columns actually used by _carrier_row_to_dict
+    _LIST_COLS = """c.id, c.dot_number, c.legal_name, c.dba_name,
+        c.phone, c.email_address, c.fax,
+        c.power_units, c.total_drivers,
+        c.phy_street, c.phy_city, c.phy_state, c.phy_zip, c.phy_country,
+        c.carrier_mailing_street, c.carrier_mailing_city,
+        c.carrier_mailing_state, c.carrier_mailing_zip, c.carrier_mailing_country,
+        c.mcs150_date, c.mcs150_mileage, c.mcs150_mileage_year,
+        c.classdef, c.carrier_operation, c.hm_ind,
+        c.dun_bradstreet_no, c.safety_rating, c.safety_rating_date,
+        c.status_code, c.carship,
+        c.docket1prefix, c.docket1, c.docket2prefix, c.docket2,
+        c.docket3prefix, c.docket3, c.docket1_status_code,
+        c.company_officer_1, c.company_officer_2,
+        c.fleetsize, c.add_date, c.truck_units, c.bus_units,
+        c.interstate_beyond_100_miles, c.interstate_within_100_miles,
+        c.intrastate_beyond_100_miles, c.intrastate_within_100_miles,
+        c.crgo_genfreight, c.crgo_household, c.crgo_metalsheet, c.crgo_motoveh,
+        c.crgo_drivetow, c.crgo_logpole, c.crgo_bldgmat, c.crgo_mobilehome,
+        c.crgo_machlrg, c.crgo_produce, c.crgo_liqgas, c.crgo_intermodal,
+        c.crgo_passengers, c.crgo_oilfield, c.crgo_livestock, c.crgo_grainfeed,
+        c.crgo_coalcoke, c.crgo_meat, c.crgo_garbage, c.crgo_usmail,
+        c.crgo_chem, c.crgo_drybulk, c.crgo_coldfood, c.crgo_beverages,
+        c.crgo_paperprod, c.crgo_utility, c.crgo_farmsupp, c.crgo_construct,
+        c.crgo_waterwell, c.crgo_cargoothr, c.crgo_cargoothr_desc"""
 
+    # Step 1: Fetch the carrier rows WITHOUT insurance join
     query = f"""
-        SELECT {_LIST_COLS},
-          COALESCE(ih_agg.filings, '[]'::jsonb) AS insurance_history_filings
+        SELECT {_LIST_COLS}
         FROM carriers c
-        LEFT JOIN LATERAL (
-            SELECT jsonb_agg(jsonb_build_object(
-              'ins_type_desc', ih.ins_type_desc,
-              'max_cov_amount', ih.max_cov_amount,
-              'underl_lim_amount', ih.underl_lim_amount,
-              'policy_no', ih.policy_no,
-              'effective_date', ih.effective_date,
-              'ins_form_code', ih.ins_form_code,
-              'name_company', ih.name_company,
-              'trans_date', ih.trans_date,
-              'cancl_effective_date', ih.cancl_effective_date
-            ) ORDER BY ih.effective_date DESC) AS filings
-            FROM insurance_history ih
-            WHERE ih.docket_number = c.docket1prefix || c.docket1
-        ) ih_agg ON true
         WHERE {where}
         ORDER BY c.id DESC
         LIMIT {limit_val} OFFSET {offset_val}
     """
 
-    count_query = f"""
-        SELECT COUNT(*) as cnt FROM carriers c
-        WHERE {where}
-    """
-
-    # For unfiltered queries (default active-only), use a fast estimate
-    # to avoid expensive COUNT(*) on millions of rows
+    # Step 2: Use a fast estimated count for ALL queries to avoid
+    # expensive COUNT(*) scans on millions of rows.
+    # For unfiltered: use pg_class reltuples.
+    # For filtered: use COUNT(*) with a hard cap to avoid long scans.
     fast_count_query = """
         SELECT reltuples::bigint AS cnt
         FROM pg_class WHERE relname = 'carriers'
+    """
+
+    # For filtered queries, cap the count scan to avoid >10s scans.
+    # We count up to limit_val + 1 so the frontend knows if there are more pages.
+    capped_count_query = f"""
+        SELECT COUNT(*) AS cnt FROM (
+            SELECT 1 FROM carriers c
+            WHERE {where}
+            LIMIT 10000
+        ) sub
     """
 
     try:
         use_fast_count = not is_filtered
         rows, count_row = await asyncio.gather(
             pool.fetch(query, *params),
-            pool.fetchrow(fast_count_query) if use_fast_count else pool.fetchrow(count_query, *params),
+            pool.fetchrow(fast_count_query) if use_fast_count else pool.fetchrow(capped_count_query, *params),
         )
         filtered_count = count_row["cnt"] if count_row else 0
+
+        # Step 3: Batch-fetch insurance history for the returned rows
+        carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
+        docket_keys = []
+        for row in rows:
+            d = dict(row)
+            pfx = d.get("docket1prefix") or ""
+            num = d.get("docket1") or ""
+            docket_keys.append(f"{pfx}{num}" if pfx and num else "")
+
+        # Only fetch insurance if we have docket numbers to look up
+        non_empty_keys = [k for k in docket_keys if k]
+        if non_empty_keys:
+            unique_keys = list(set(non_empty_keys))
+            ih_rows = await pool.fetch(
+                """
+                SELECT docket_number, ins_type_desc, max_cov_amount,
+                       underl_lim_amount, policy_no, effective_date,
+                       ins_form_code, name_company, trans_date,
+                       cancl_effective_date
+                FROM insurance_history
+                WHERE docket_number = ANY($1)
+                ORDER BY effective_date DESC
+                """,
+                unique_keys,
+            )
+            # Group filings by docket_number
+            ih_map: dict[str, list[dict]] = {}
+            for ih_row in ih_rows:
+                dk = ih_row["docket_number"]
+                if dk not in ih_map:
+                    ih_map[dk] = []
+                ih_map[dk].append(dict(ih_row))
+
+            # Attach insurance filings to each carrier
+            for i, carrier in enumerate(carrier_dicts):
+                dk = docket_keys[i]
+                if dk and dk in ih_map:
+                    carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
+
         return {
-            "data": [_carrier_row_to_dict(row) for row in rows],
+            "data": carrier_dicts,
             "filtered_count": filtered_count,
         }
     except Exception as e:
