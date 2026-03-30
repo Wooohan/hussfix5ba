@@ -998,20 +998,16 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
 
     # ------------------------------------------------------------------
-    # Insurance-related filters – consolidated into a SINGLE sub-query
+    # Insurance-related filters – SEPARATE EXISTS per filter
     # ------------------------------------------------------------------
-    # Instead of N separate EXISTS sub-queries (one per insurance filter),
-    # we collect all positive conditions into one EXISTS and all negative
-    # conditions into one NOT EXISTS.  This lets PG scan insurance_history
-    # at most twice instead of N times.
+    # Each insurance filter gets its own independent EXISTS/NOT EXISTS
+    # sub-query. This is correct because different insurance_history rows
+    # may satisfy different filter conditions (e.g. one row for BIPD,
+    # another for renewal date). Combining them into a single EXISTS
+    # over-constrains results and returns wrong data.
 
     _IH_JOIN = "ih.docket_number = c.docket1prefix || c.docket1"
     _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
-
-    # Collect positive (EXISTS) and negative (NOT EXISTS) insurance conditions
-    ih_positive_conds: list[str] = []  # all must be true inside one EXISTS
-    ih_negative_conds: list[str] = []  # each becomes a NOT EXISTS
-    ih_positive_or_conds: list[str] = []  # OR-grouped inside one EXISTS
 
     if filters.get("insurance_required"):
         ins_types = filters["insurance_required"]
@@ -1021,11 +1017,12 @@ async def fetch_carriers(filters: dict) -> dict:
         for itype in ins_types:
             pattern = _INS_TYPE_PATTERN.get(itype, itype)
             or_parts.append(
-                f"(ih.ins_type_desc LIKE ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+                f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+                f"AND ih.ins_type_desc LIKE ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
             )
             params.append(pattern)
             idx += 1
-        ih_positive_or_conds.append(f"({' OR '.join(or_parts)})")
+        conditions.append(f"({' OR '.join(or_parts)})")
 
     # BIPD / Cargo / Bond / Trust Fund on-file flags
     for filter_key, pattern_val, use_like in [
@@ -1038,28 +1035,37 @@ async def fetch_carriers(filters: dict) -> dict:
         if val is None:
             continue
         op = "LIKE" if use_like else "="
-        cond = f"ih.ins_type_desc {op} ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '')"
-        params.append(pattern_val)
-        idx += 1
         if val == "1":
-            ih_positive_conds.append(cond)
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+                f"AND ih.ins_type_desc {op} ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+            )
+            params.append(pattern_val)
+            idx += 1
         elif val == "0":
-            ih_negative_conds.append(cond)
+            conditions.append(
+                f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+                f"AND ih.ins_type_desc {op} ${idx} AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+            )
+            params.append(pattern_val)
+            idx += 1
 
     # BIPD amount range
     if filters.get("bipd_min"):
         raw_min = int(filters["bipd_min"])
         compare_min = raw_min // 1000 if raw_min >= 10000 else raw_min
-        ih_positive_conds.append(
-            f"NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric >= ${idx}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric >= ${idx})"
         )
         params.append(compare_min)
         idx += 1
     if filters.get("bipd_max"):
         raw_max = int(filters["bipd_max"])
         compare_max = raw_max // 1000 if raw_max >= 10000 else raw_max
-        ih_positive_conds.append(
-            f"NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric <= ${idx}"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND NULLIF(REPLACE(ih.max_cov_amount, ',', ''), '')::numeric <= ${idx})"
         )
         params.append(compare_max)
         idx += 1
@@ -1068,18 +1074,20 @@ async def fetch_carriers(filters: dict) -> dict:
     if filters.get("ins_effective_date_from"):
         parts = filters["ins_effective_date_from"].split("-")
         date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_from_db_fmt)
         idx += 1
     if filters.get("ins_effective_date_to"):
         parts = filters["ins_effective_date_to"].split("-")
         date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"AND TO_DATE(ih.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_to_db_fmt)
         idx += 1
@@ -1088,20 +1096,22 @@ async def fetch_carriers(filters: dict) -> dict:
     if filters.get("ins_cancellation_date_from"):
         parts = filters["ins_cancellation_date_from"].split("-")
         date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' "
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' "
             f"AND ih.cancl_effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_from_db_fmt)
         idx += 1
     if filters.get("ins_cancellation_date_to"):
         parts = filters["ins_cancellation_date_to"].split("-")
         date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' "
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND ih.cancl_effective_date IS NOT NULL AND ih.cancl_effective_date != '' "
             f"AND ih.cancl_effective_date LIKE '%/%/%' "
-            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f"AND TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_to_db_fmt)
         idx += 1
@@ -1129,15 +1139,15 @@ async def fetch_carriers(filters: dict) -> dict:
             company_upper = company.strip().upper()
             patterns = _INSURANCE_COMPANY_PATTERNS.get(company_upper, [f"{company_upper}%"])
             for pattern in patterns:
-                or_parts.append(f"UPPER(ih.name_company) LIKE ${idx}")
+                or_parts.append(
+                    f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+                    f"AND UPPER(ih.name_company) LIKE ${idx} "
+                    f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
+                    f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE))"
+                )
                 params.append(pattern)
                 idx += 1
-        # Company filter also requires the policy to be active
-        ih_positive_conds.append(
-            f"({' OR '.join(or_parts)}) "
-            f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
-            f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
-        )
+        conditions.append(f"({' OR '.join(or_parts)})")
 
     # Simplified next-renewal-date helper.
     # Computes the next anniversary of ih.effective_date on or after today.
@@ -1181,10 +1191,11 @@ async def fetch_carriers(filters: dict) -> dict:
     # Renewal Policy Monthly filter
     if filters.get("renewal_policy_months"):
         months = int(filters["renewal_policy_months"])
-        ih_positive_conds.append(
-            f"{_ACTIVE_POLICY_GUARD} AND "
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND {_ACTIVE_POLICY_GUARD} AND "
             f"({_next_renewal_sql}) BETWEEN CURRENT_DATE AND "
-            f"(DATE_TRUNC('MONTH', CURRENT_DATE + MAKE_INTERVAL(months => ${idx})) + INTERVAL '1 MONTH - 1 DAY')::date"
+            f"(DATE_TRUNC('MONTH', CURRENT_DATE + MAKE_INTERVAL(months => ${idx})) + INTERVAL '1 MONTH - 1 DAY')::date)"
         )
         params.append(months)
         idx += 1
@@ -1193,36 +1204,23 @@ async def fetch_carriers(filters: dict) -> dict:
     if filters.get("renewal_date_from"):
         parts = filters["renewal_date_from"].split("-")
         date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"{_ACTIVE_POLICY_GUARD} AND "
-            f"({_next_renewal_sql}) >= TO_DATE(${idx}, 'MM/DD/YYYY')"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND {_ACTIVE_POLICY_GUARD} AND "
+            f"({_next_renewal_sql}) >= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_from_db_fmt)
         idx += 1
     if filters.get("renewal_date_to"):
         parts = filters["renewal_date_to"].split("-")
         date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        ih_positive_conds.append(
-            f"{_ACTIVE_POLICY_GUARD} AND "
-            f"({_next_renewal_sql}) <= TO_DATE(${idx}, 'MM/DD/YYYY')"
+        conditions.append(
+            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} "
+            f"AND {_ACTIVE_POLICY_GUARD} AND "
+            f"({_next_renewal_sql}) <= TO_DATE(${idx}, 'MM/DD/YYYY'))"
         )
         params.append(date_to_db_fmt)
         idx += 1
-
-    # --- Emit the consolidated insurance sub-queries -----------------
-    # Positive: a single EXISTS with ALL positive + OR conditions ANDed
-    all_positive = ih_positive_conds + ih_positive_or_conds
-    if all_positive:
-        combined = " AND ".join(f"({c})" for c in all_positive)
-        conditions.append(
-            f"EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} AND {combined})"
-        )
-
-    # Negative: each NOT EXISTS is independent (carrier must lack ALL)
-    for neg_cond in ih_negative_conds:
-        conditions.append(
-            f"NOT EXISTS (SELECT 1 FROM insurance_history ih WHERE {_IH_JOIN} AND {neg_cond})"
-        )
 
     # ------------------------------------------------------------------
     # Default / WHERE / LIMIT / OFFSET
@@ -1273,22 +1271,19 @@ async def fetch_carriers(filters: dict) -> dict:
     # ------------------------------------------------------------------
     # Count strategy
     # ------------------------------------------------------------------
+    # For unfiltered queries: use pg_class.reltuples (instant estimate).
+    # For filtered queries: use real COUNT(*) so the UI shows accurate
+    # totals. EXPLAIN estimates are wildly inaccurate for complex
+    # EXISTS sub-queries and often return 0 or 1.
     fast_count_query = """
         SELECT reltuples::bigint AS cnt
         FROM pg_class WHERE relname = 'carriers'
     """
 
-    async def _explain_estimate(pool_ref, where_clause, prms):
-        """Use EXPLAIN to get an instant row-count estimate (no full scan)."""
-        try:
-            explain_sql = f"EXPLAIN (FORMAT JSON) SELECT 1 FROM carriers c WHERE {where_clause}"
-            explain_row = await pool_ref.fetchrow(explain_sql, *prms)
-            if explain_row:
-                plan = json.loads(explain_row[0])[0]
-                return int(plan.get("Plan", {}).get("Plan Rows", 0))
-        except Exception:
-            pass
-        return 0
+    count_query = f"""
+        SELECT COUNT(*) AS cnt FROM carriers c
+        WHERE {where}
+    """
 
     try:
         use_fast_count = not is_filtered
@@ -1299,10 +1294,11 @@ async def fetch_carriers(filters: dict) -> dict:
             )
             filtered_count = count_row["cnt"] if count_row else 0
         else:
-            rows, filtered_count = await asyncio.gather(
+            rows, count_row = await asyncio.gather(
                 pool.fetch(query, *params),
-                _explain_estimate(pool, where, params),
+                pool.fetchrow(count_query, *params),
             )
+            filtered_count = count_row["cnt"] if count_row else 0
 
         # Batch-fetch insurance history for the returned rows
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
