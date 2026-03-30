@@ -429,11 +429,11 @@ async def api_upsert_carriers_batch(request: Request):
             else:
                 failed += 1
     return {"success": failed == 0, "saved": saved, "failed": failed}
-@app.delete("/api/carriers/{mc_number}")
-async def api_delete_carrier(mc_number: str, request: Request):
+@app.delete("/api/carriers/{dot_number}")
+async def api_delete_carrier(dot_number: str, request: Request):
     if not _require_admin(request):
         return JSONResponse(status_code=403, content={"error": "Admin access required"})
-    ok = await db_delete_carrier(mc_number)
+    ok = await db_delete_carrier(dot_number)
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found"})
@@ -778,7 +778,7 @@ async def api_delete_new_venture(record_id: str, request: Request):
     if ok:
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "Record not found"})
-@app.get("/api/carriers/{mc_number}/insurance-history")
-async def api_get_insurance_history(mc_number: str):
-    policies = await fetch_insurance_history(mc_number)
-    return {"success": True, "mc_number": mc_number, "policies": policies, "count": len(policies)}
+@app.get("/api/carriers/{docket_number}/insurance-history")
+async def api_get_insurance_history(docket_number: str):
+    policies = await fetch_insurance_history(docket_number)
+    return {"success": True, "docket_number": docket_number, "policies": policies, "count": len(policies)}
