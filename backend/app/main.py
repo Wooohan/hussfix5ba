@@ -19,10 +19,6 @@ from app.task_manager import task_manager
 from app.fmcsa_register import scrape_fmcsa_register
 from app.broker_snapshot import scrape_broker_snapshot
 from app.auth import create_token, verify_token, require_auth
-from app.company_census import (
-    fetch_census_carriers, get_census_carrier_count,
-    get_census_dashboard_stats, get_census_carriers_by_mc_range,
-)
 from app.database import (
     connect_db, close_db,
     upsert_carrier, fetch_carriers, delete_carrier as db_delete_carrier,
@@ -405,7 +401,7 @@ async def api_fetch_carriers(
         has_filters = any(v for k, v in filters.items() if k not in ("limit", "offset"))
         if not has_filters:
             filters["limit"] = 200
-    result = await fetch_census_carriers(filters)
+    result = await fetch_carriers(filters)
     return result
 @app.post("/api/carriers")
 async def api_upsert_carrier(request: Request):
@@ -443,11 +439,11 @@ async def api_delete_carrier(mc_number: str, request: Request):
     return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found"})
 @app.get("/api/carriers/count")
 async def api_get_carrier_count():
-    count = await get_census_carrier_count()
+    count = await get_carrier_count()
     return {"count": count}
 @app.get("/api/carriers/dashboard-stats")
 async def api_get_carrier_dashboard_stats():
-    stats = await get_census_dashboard_stats()
+    stats = await get_carrier_dashboard_stats()
     return stats
 @app.put("/api/carriers/{dot_number}/insurance")
 async def api_update_carrier_insurance(dot_number: str, request: Request):
@@ -469,7 +465,7 @@ async def api_get_carriers_by_range(
     start: str = Query(...),
     end: str = Query(...),
 ):
-    data = await get_census_carriers_by_mc_range(start, end)
+    data = await get_carriers_by_mc_range(start, end)
     return data
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request):
