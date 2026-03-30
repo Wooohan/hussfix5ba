@@ -1292,20 +1292,8 @@ async def fetch_carriers(filters: dict) -> dict:
         FROM pg_class WHERE relname = 'carriers'
     """
 
-    async def _filtered_count(pool_ref, where_clause, prms):
-        """Get filtered count: try exact COUNT with 8s timeout, fall back to EXPLAIN estimate."""
-        count_sql = f"SELECT COUNT(*) AS cnt FROM carriers c WHERE {where_clause}"
-        try:
-            async with pool_ref.acquire() as conn:
-                await conn.execute("SET LOCAL statement_timeout = '8000'")
-                row = await conn.fetchrow(count_sql, *prms)
-                return row["cnt"] if row else 0
-        except asyncpg.QueryCanceledError:
-            # COUNT timed out — fall back to EXPLAIN estimate
-            pass
-        except Exception:
-            pass
-        # Fallback: EXPLAIN estimate (instant)
+    async def _explain_estimate(pool_ref, where_clause, prms):
+        """Use EXPLAIN to get an instant row-count estimate (no full scan)."""
         try:
             explain_sql = f"EXPLAIN (FORMAT JSON) SELECT 1 FROM carriers c WHERE {where_clause}"
             explain_row = await pool_ref.fetchrow(explain_sql, *prms)
@@ -1325,8 +1313,11 @@ async def fetch_carriers(filters: dict) -> dict:
             )
             filtered_count = count_row["cnt"] if count_row else 0
         else:
-            rows = await pool.fetch(query, *params)
-            filtered_count = await _filtered_count(pool, where, params)
+            # Run data fetch and EXPLAIN estimate in parallel (both fast)
+            rows, filtered_count = await asyncio.gather(
+                pool.fetch(query, *params),
+                _explain_estimate(pool, where, params),
+            )
 
         # Step 3: Batch-fetch insurance history for the returned rows
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
