@@ -122,6 +122,28 @@ CREATE INDEX IF NOT EXISTS idx_ih_docket_effective ON insurance_history(docket_n
 -- Composite index for insurance company name lookups
 CREATE INDEX IF NOT EXISTS idx_ih_docket_company ON insurance_history(docket_number, name_company);
 
+-- Primary join index for EXISTS subqueries (single-column, covers all join patterns)
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_number ON insurance_history(docket_number);
+
+-- Trigram index for LIKE pattern matching on insurance type description
+CREATE INDEX IF NOT EXISTS idx_insurance_history_ins_type_trgm ON insurance_history USING gin (ins_type_desc gin_trgm_ops);
+
+-- For active policy filtering (cancellation date checks)
+CREATE INDEX IF NOT EXISTS idx_insurance_history_cancl_effective ON insurance_history(cancl_effective_date);
+
+-- Composite index for common filter combinations (docket + type + cancellation)
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type_active ON insurance_history(
+  docket_number,
+  ins_type_desc,
+  cancl_effective_date
+);
+
+-- For date range queries on effective_date
+CREATE INDEX IF NOT EXISTS idx_insurance_history_effective_date ON insurance_history(effective_date);
+
+-- For BIPD amount range filtering
+CREATE INDEX IF NOT EXISTS idx_insurance_history_max_cov_amount ON insurance_history(max_cov_amount);
+
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
@@ -1082,43 +1104,39 @@ async def fetch_carriers(filters: dict) -> dict:
         )
 
     # ── Insurance effective-date range ────────────────────────────────
+    # Dates are stored as MM/DD/YYYY; pre-convert the ISO filter value once
+    # in Python and use direct string comparison, avoiding a per-row
+    # TO_DATE() call that prevents index use on effective_date.
     eff_conds: list[str] = []
     if filters.get("ins_effective_date_from"):
         parts = filters["ins_effective_date_from"].split("-")
-        eff_conds.append(
-            f"TO_DATE(ih.effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
+        eff_conds.append(f"ih.effective_date >= ${idx}")
         params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
         idx += 1
     if filters.get("ins_effective_date_to"):
         parts = filters["ins_effective_date_to"].split("-")
-        eff_conds.append(
-            f"TO_DATE(ih.effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
+        eff_conds.append(f"ih.effective_date <= ${idx}")
         params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
         idx += 1
     if eff_conds:
         conditions.append(
             f"{_IH_DOCKET_EXPR} IN ("
             f"SELECT ih.docket_number FROM insurance_history ih "
-            f"WHERE ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
+            f"WHERE ih.effective_date IS NOT NULL "
             f"AND {' AND '.join(eff_conds)})"
         )
 
     # ── Insurance cancellation-date range ─────────────────────────────
+    # Same approach: pre-convert once in Python, compare strings directly.
     cancl_conds: list[str] = []
     if filters.get("ins_cancellation_date_from"):
         parts = filters["ins_cancellation_date_from"].split("-")
-        cancl_conds.append(
-            f"TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
+        cancl_conds.append(f"ih.cancl_effective_date >= ${idx}")
         params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
         idx += 1
     if filters.get("ins_cancellation_date_to"):
         parts = filters["ins_cancellation_date_to"].split("-")
-        cancl_conds.append(
-            f"TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
+        cancl_conds.append(f"ih.cancl_effective_date <= ${idx}")
         params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
         idx += 1
     if cancl_conds:
@@ -1127,7 +1145,6 @@ async def fetch_carriers(filters: dict) -> dict:
             f"SELECT ih.docket_number FROM insurance_history ih "
             f"WHERE ih.cancl_effective_date IS NOT NULL "
             f"AND ih.cancl_effective_date != '' "
-            f"AND ih.cancl_effective_date LIKE '%/%/%' "
             f"AND {' AND '.join(cancl_conds)})"
         )
 
@@ -1159,49 +1176,52 @@ async def fetch_carriers(filters: dict) -> dict:
                 or_parts.append(f"UPPER(ih.name_company) LIKE ${idx}")
                 params.append(pattern)
                 idx += 1
+        # Use _ACTIVE_CANCL (already defined above) — no TO_DATE() needed
         conditions.append(
             f"{_IH_DOCKET_EXPR} IN ("
             f"SELECT ih.docket_number FROM insurance_history ih "
             f"WHERE ({' OR '.join(or_parts)}) "
-            f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
-            f"OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE))"
+            f"AND {_ACTIVE_CANCL})"
         )
 
-    # ── Next-renewal-date helper (unchanged logic) ────────────────────
+    # ── Next-renewal-date helper ──────────────────────────────────────
+    # Uses SPLIT_PART instead of TO_DATE to extract month/day from the
+    # MM/DD/YYYY string, avoiding a full date parse on every row.
     _next_renewal_sql = (
         "CASE "
         "  WHEN MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
+        "         SPLIT_PART(ih.effective_date, '/', 1)::int,"
+        "         LEAST(SPLIT_PART(ih.effective_date, '/', 2)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 SPLIT_PART(ih.effective_date, '/', 1)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "       >= CURRENT_DATE "
         "  THEN MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
+        "         SPLIT_PART(ih.effective_date, '/', 1)::int,"
+        "         LEAST(SPLIT_PART(ih.effective_date, '/', 2)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 SPLIT_PART(ih.effective_date, '/', 1)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "  ELSE MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "         EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int,"
+        "         SPLIT_PART(ih.effective_date, '/', 1)::int,"
+        "         LEAST(SPLIT_PART(ih.effective_date, '/', 2)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "                 EXTRACT(MONTH FROM TO_DATE(ih.effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 SPLIT_PART(ih.effective_date, '/', 1)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "END"
     )
 
+    # Active-policy guard for renewal filters: effective date present and
+    # policy not cancelled (no cancellation date set).
     _ACTIVE_POLICY_GUARD = (
-        "ih.effective_date IS NOT NULL AND ih.effective_date LIKE '%/%/%' "
-        "AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = '' "
-        "OR TO_DATE(ih.cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
+        f"ih.effective_date IS NOT NULL AND ih.effective_date != '' "
+        f"AND {_ACTIVE_CANCL}"
     )
 
     # ── Renewal Policy Monthly filter ─────────────────────────────────
@@ -1219,20 +1239,17 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
 
     # ── Renewal Policy Date range filter ──────────────────────────────
+    # Pass ISO date strings cast with ::date instead of TO_DATE() per row.
     renewal_conds: list[str] = []
     if filters.get("renewal_date_from"):
         parts = filters["renewal_date_from"].split("-")
-        renewal_conds.append(
-            f"({_next_renewal_sql}) >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
+        renewal_conds.append(f"({_next_renewal_sql}) >= ${idx}::date")
+        params.append(f"{parts[0]}-{parts[1]}-{parts[2]}")
         idx += 1
     if filters.get("renewal_date_to"):
         parts = filters["renewal_date_to"].split("-")
-        renewal_conds.append(
-            f"({_next_renewal_sql}) <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(f"{parts[1]}/{parts[2]}/{parts[0]}")
+        renewal_conds.append(f"({_next_renewal_sql}) <= ${idx}::date")
+        params.append(f"{parts[0]}-{parts[1]}-{parts[2]}")
         idx += 1
     if renewal_conds:
         conditions.append(
@@ -1241,6 +1258,8 @@ async def fetch_carriers(filters: dict) -> dict:
             f"WHERE {_ACTIVE_POLICY_GUARD} "
             f"AND {' AND '.join(renewal_conds)})"
         )
+
+
 
     # ------------------------------------------------------------------
     # Default / WHERE / LIMIT / OFFSET
