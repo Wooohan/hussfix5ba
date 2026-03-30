@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import time as _time
 import asyncpg
 from typing import Optional
 
@@ -10,6 +11,11 @@ if not DATABASE_URL:
     warnings.warn("DATABASE_URL is not set. Database connections will fail.")
 
 _pool: Optional[asyncpg.Pool] = None
+
+# ── Dashboard stats cache ────────────────────────────────────────────────────
+_dashboard_cache: Optional[dict] = None
+_dashboard_cache_ts: float = 0.0
+_DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 
 _SCHEMA_SQL = """
@@ -82,6 +88,17 @@ CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type ON insurance_history(docket_number, ins_type_desc);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_cancl ON insurance_history(docket_number, cancl_effective_date);
+
+-- Expression index for fast insurance join (avoids per-row concatenation)
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_key ON carriers((docket1prefix || docket1));
+
+-- Partial indexes for common boolean-style filters
+CREATE INDEX IF NOT EXISTS idx_carriers_has_email ON carriers(id DESC) WHERE email_address IS NOT NULL AND email_address != '';
+CREATE INDEX IF NOT EXISTS idx_carriers_active_id ON carriers(id DESC) WHERE status_code = 'A';
+
+-- Power units / drivers as integer for range filters
+CREATE INDEX IF NOT EXISTS idx_carriers_power_units ON carriers((NULLIF(power_units, '')::int)) WHERE power_units IS NOT NULL AND power_units != '';
+CREATE INDEX IF NOT EXISTS idx_carriers_total_drivers ON carriers((NULLIF(total_drivers, '')::int)) WHERE total_drivers IS NOT NULL AND total_drivers != '';
 
 -- Composite indexes for common carrier search filter patterns
 CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status ON carriers(docket1_status_code);
@@ -318,7 +335,10 @@ ON CONFLICT (email) DO NOTHING;
 
 async def connect_db() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(
+        DATABASE_URL, min_size=2, max_size=20,
+        command_timeout=60,
+    )
     try:
         async with _pool.acquire() as conn:
             await conn.execute(_SCHEMA_SQL)
@@ -1222,7 +1242,9 @@ async def fetch_carriers(filters: dict) -> dict:
     if is_filtered:
         limit_val = int(filters.get("limit", 500))
     else:
-        limit_val = int(filters.get("limit", 200))
+        limit_val = int(filters.get("limit", 500))
+    # Allow up to 5000 per page
+    limit_val = min(limit_val, 5000)
 
     offset_val = int(filters.get("offset", 0))
 
@@ -1261,32 +1283,50 @@ async def fetch_carriers(filters: dict) -> dict:
         LIMIT {limit_val} OFFSET {offset_val}
     """
 
-    # Step 2: Use a fast estimated count for ALL queries to avoid
-    # expensive COUNT(*) scans on millions of rows.
-    # For unfiltered: use pg_class reltuples.
-    # For filtered: use COUNT(*) with a hard cap to avoid long scans.
+    # Step 2: Count strategy
+    # - Unfiltered: use pg_class reltuples (instant, estimated).
+    # - Filtered: use EXPLAIN plan_rows for fast estimate, then try
+    #   exact COUNT with a timeout.  This removes the old 10k cap.
     fast_count_query = """
         SELECT reltuples::bigint AS cnt
         FROM pg_class WHERE relname = 'carriers'
     """
 
-    # For filtered queries, cap the count scan to avoid >10s scans.
-    # We count up to limit_val + 1 so the frontend knows if there are more pages.
-    capped_count_query = f"""
-        SELECT COUNT(*) AS cnt FROM (
-            SELECT 1 FROM carriers c
-            WHERE {where}
-            LIMIT 10000
-        ) sub
-    """
+    async def _filtered_count(pool_ref, where_clause, prms):
+        """Get filtered count: try exact COUNT with 8s timeout, fall back to EXPLAIN estimate."""
+        count_sql = f"SELECT COUNT(*) AS cnt FROM carriers c WHERE {where_clause}"
+        try:
+            async with pool_ref.acquire() as conn:
+                await conn.execute("SET LOCAL statement_timeout = '8000'")
+                row = await conn.fetchrow(count_sql, *prms)
+                return row["cnt"] if row else 0
+        except asyncpg.QueryCanceledError:
+            # COUNT timed out — fall back to EXPLAIN estimate
+            pass
+        except Exception:
+            pass
+        # Fallback: EXPLAIN estimate (instant)
+        try:
+            explain_sql = f"EXPLAIN (FORMAT JSON) SELECT 1 FROM carriers c WHERE {where_clause}"
+            explain_row = await pool_ref.fetchrow(explain_sql, *prms)
+            if explain_row:
+                plan = json.loads(explain_row[0])[0]
+                return int(plan.get("Plan", {}).get("Plan Rows", 0))
+        except Exception:
+            pass
+        return 0
 
     try:
         use_fast_count = not is_filtered
-        rows, count_row = await asyncio.gather(
-            pool.fetch(query, *params),
-            pool.fetchrow(fast_count_query) if use_fast_count else pool.fetchrow(capped_count_query, *params),
-        )
-        filtered_count = count_row["cnt"] if count_row else 0
+        if use_fast_count:
+            rows, count_row = await asyncio.gather(
+                pool.fetch(query, *params),
+                pool.fetchrow(fast_count_query),
+            )
+            filtered_count = count_row["cnt"] if count_row else 0
+        else:
+            rows = await pool.fetch(query, *params)
+            filtered_count = await _filtered_count(pool, where, params)
 
         # Step 3: Batch-fetch insurance history for the returned rows
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
@@ -1351,13 +1391,21 @@ async def delete_carrier(dot_number: str) -> bool:
 
 
 async def get_carrier_count() -> int:
+    """Fast estimated count using pg_class reltuples (instant on large tables)."""
     pool = get_pool()
-    row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM carriers")
+    row = await pool.fetchrow(
+        "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
+    )
     return row["cnt"] if row else 0
 
 
 async def get_carrier_dashboard_stats() -> dict:
-    """Dashboard statistics for Census data."""
+    """Dashboard statistics for Census data (cached for 5 minutes)."""
+    global _dashboard_cache, _dashboard_cache_ts
+    now = _time.time()
+    if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
+        return _dashboard_cache
+
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -1373,7 +1421,7 @@ async def get_carrier_dashboard_stats() -> dict:
         """)
         if not row:
             return {}
-        return {
+        result = {
             "total": row["total"],
             "active": row["active"],
             "inactive": row["total"] - row["active"],
@@ -1383,9 +1431,12 @@ async def get_carrier_dashboard_stats() -> dict:
             "intrastate_hm": row["intrastate_hm"],
             "intrastate_non_hm": row["intrastate_non_hm"],
         }
+        _dashboard_cache = result
+        _dashboard_cache_ts = now
+        return result
     except Exception as e:
         print(f"[DB] Error fetching dashboard stats: {e}")
-        return {}
+        return _dashboard_cache or {}
 
 
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
