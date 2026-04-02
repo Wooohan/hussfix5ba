@@ -140,10 +140,6 @@ CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_created_at ON carriers(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_carriers_status ON carriers(status);
 
--- Trigram indexes for fast ILIKE text search on carriers
-CREATE INDEX IF NOT EXISTS idx_carriers_legal_name_trgm ON carriers USING gin (legal_name gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_carriers_mc_number_trgm ON carriers USING gin (mc_number gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_trgm ON carriers USING gin (dot_number gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_fmcsa_register_number ON fmcsa_register(number);
 CREATE INDEX IF NOT EXISTS idx_fmcsa_register_date_fetched ON fmcsa_register(date_fetched DESC);
