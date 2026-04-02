@@ -24,6 +24,21 @@ _SCHEMA_SQL = """
 -- with ~4.4M records.  The table already exists in the database so we do NOT
 -- try to CREATE it here.  The schema is managed externally.
 
+CREATE TABLE IF NOT EXISTS insurance_history (
+    id SERIAL PRIMARY KEY,
+    docket_number TEXT NOT NULL, -- Links to carriers.docket1 or new_ventures.docket_number
+    ins_type_desc TEXT,          -- BIPD, Cargo, Bond, etc.
+    max_cov_amount TEXT,         -- Stored as string to match your int($1)*1000 logic
+    policy_no TEXT,
+    effective_date TEXT,
+    name_company TEXT,           -- The insurance provider name
+    ins_form_code TEXT,
+    trans_date TEXT,
+    underl_lim_amount TEXT,
+    cancl_effective_date TEXT,   -- If present, status becomes "Cancelled"
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS fmcsa_register (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     number TEXT NOT NULL,
