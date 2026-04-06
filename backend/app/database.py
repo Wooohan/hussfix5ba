@@ -965,20 +965,13 @@ async def fetch_carriers(filters: dict) -> dict:
         count_query = f"SELECT COUNT(*) AS cnt FROM carriers {where}"
         count_params = params
 
-try:
-        # Define two separate tasks. Each one will check out its own connection from the pool.
-        async def fetch_data():
-            async with pool.acquire() as conn:
-                await conn.execute("SET LOCAL work_mem = '128MB'")
-                return await conn.fetch(data_query, *params)
-
-        async def fetch_count():
-            async with pool.acquire() as conn:
-                return await conn.fetchrow(count_query, *count_params)
-
-        # Now they can actually run in parallel because they use two different connections
-        rows, count_row = await asyncio.gather(fetch_data(), fetch_count())
-
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("SET LOCAL work_mem = '128MB'")
+            rows, count_row = await asyncio.gather(
+                conn.fetch(data_query, *params),
+                conn.fetchrow(count_query, *count_params),
+            )
         filtered_count = count_row["cnt"] if count_row else 0
         return {
             "data": [_carrier_row_to_dict(row) for row in rows],
@@ -987,6 +980,7 @@ try:
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
+
 
 async def delete_carrier(mc_number: str) -> bool:
     pool = get_pool()
