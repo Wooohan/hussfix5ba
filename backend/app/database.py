@@ -965,13 +965,18 @@ async def fetch_carriers(filters: dict) -> dict:
         count_query = f"SELECT COUNT(*) AS cnt FROM carriers {where}"
         count_params = params
 
-    try:
+try:
         async with pool.acquire() as conn:
-            await conn.execute("SET LOCAL work_mem = '128MB'")
-            rows, count_row = await asyncio.gather(
-                conn.fetch(data_query, *params),
-                conn.fetchrow(count_query, *count_params),
-            )
+            # 1. Start a transaction so 'SET LOCAL' is valid
+            async with conn.transaction():
+                # Increase memory for this specific search/sort operation
+                await conn.execute("SET LOCAL work_mem = '128MB'")
+                
+                # 2. Execute sequentially, NOT with asyncio.gather, 
+                # because a single connection cannot handle two queries at once.
+                rows = await conn.fetch(data_query, *params)
+                count_row = await conn.fetchrow(count_query, *count_params)
+
         filtered_count = count_row["cnt"] if count_row else 0
         return {
             "data": [_carrier_row_to_dict(row) for row in rows],
@@ -980,8 +985,7 @@ async def fetch_carriers(filters: dict) -> dict:
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
-
-
+        
 async def delete_carrier(mc_number: str) -> bool:
     pool = get_pool()
     try:
