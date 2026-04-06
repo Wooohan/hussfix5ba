@@ -3,6 +3,7 @@ import json
 import asyncio
 import asyncpg
 from typing import Optional
+from datetime import date as _date
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
@@ -10,7 +11,6 @@ if not DATABASE_URL:
     warnings.warn("DATABASE_URL is not set. Database connections will fail.")
 
 _pool: Optional[asyncpg.Pool] = None
-
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS carriers (
@@ -680,20 +680,17 @@ _STATUS_LABEL = {"A": "Authorized", "I": "Inactive", "P": "Pending"}
 def _carrier_row_to_dict(row) -> dict:
     d = dict(row)
 
-    # Resolve MC number from docket1/2/3 with prefix 'MC'
     mc_number = None
     for i in ("1", "2", "3"):
         if d.get(f"docket{i}prefix") == "MC":
             mc_number = d.get(f"docket{i}")
             break
 
-    # Build full docket strings (prefix + number)
     for i in ("1", "2", "3"):
         pfx = d.get(f"docket{i}prefix") or ""
         num = d.get(f"docket{i}") or ""
         d[f"docket{i}"] = f"{pfx}{num}" if pfx and num else (num or None)
 
-    # Addresses
     physical_address = ", ".join(filter(None, [
         d.get("phy_street"), d.get("phy_city"),
         d.get("phy_state"), d.get("phy_zip"), d.get("phy_country"),
@@ -704,18 +701,14 @@ def _carrier_row_to_dict(row) -> dict:
         d.get("carrier_mailing_country"),
     ]))
 
-    # Cargo carried ('X' = active in new schema)
     cargo_carried = [label for label, col in _CARGO_MAP.items() if d.get(col) == "X"]
 
-    # Classification — semicolon-separated string in classdef column
     classdef = d.get("classdef") or ""
     operation_classification = [s.strip() for s in classdef.split(";") if s.strip()]
 
-    # Carrier operation code → human label
     op_code = d.get("carrier_operation")
     carrier_operation = [_CARRIER_OP_LABEL.get(op_code, op_code)] if op_code else []
 
-    # Status
     status_code = d.get("status_code")
     status = _STATUS_LABEL.get(status_code, status_code)
 
@@ -777,27 +770,23 @@ async def fetch_carriers(filters: dict) -> dict:
     params: list = []
     idx = 1
 
-    # -- DOT number (exact match, digits only)
     if filters.get("dot_number"):
         clean = "".join(c for c in filters["dot_number"] if c.isdigit())
         conditions.append(f"dot_number = ${idx}")
         params.append(clean)
         idx += 1
 
-    # -- MC number (search docket1/2/3 columns)
     if filters.get("mc_number"):
         clean = "".join(c for c in filters["mc_number"] if c.isdigit())
         conditions.append(f"(docket1 = ${idx} OR docket2 = ${idx} OR docket3 = ${idx})")
         params.append(clean)
         idx += 1
 
-    # -- Legal name (trigram-indexed ILIKE)
     if filters.get("legal_name"):
         conditions.append(f"legal_name ILIKE ${idx}")
         params.append(f"%{filters['legal_name']}%")
         idx += 1
 
-    # -- State (phy_state column, 2-letter code)
     if filters.get("state"):
         states = [s.strip().upper() for s in filters["state"].split("|") if s.strip()]
         placeholders = ", ".join(f"${idx + i}" for i in range(len(states)))
@@ -805,41 +794,35 @@ async def fetch_carriers(filters: dict) -> dict:
         params.extend(states)
         idx += len(states)
 
-    # -- Active / status  (status_code: A=Active, I=Inactive, P=Pending)
     active = filters.get("active")
     if active == "true":
         conditions.append("status_code = 'A'")
     elif active == "false":
         conditions.append("status_code != 'A'")
 
-    # -- Entity type (business_org_desc)
     if filters.get("entity_type"):
         conditions.append(f"business_org_desc ILIKE ${idx}")
         params.append(f"%{filters['entity_type']}%")
         idx += 1
 
-    # -- Has email
     has_email = filters.get("has_email")
     if has_email == "true":
         conditions.append("(email_address IS NOT NULL AND email_address != '')")
     elif has_email == "false":
         conditions.append("(email_address IS NULL OR email_address = '')")
 
-    # -- Has company rep (company_officer_1)
     has_company_rep = filters.get("has_company_rep")
     if has_company_rep == "true":
         conditions.append("(company_officer_1 IS NOT NULL AND company_officer_1 != '')")
     elif has_company_rep == "false":
         conditions.append("(company_officer_1 IS NULL OR company_officer_1 = '')")
 
-    # -- Hazmat (hm_ind: Y/N)
     hazmat = filters.get("hazmat")
     if hazmat == "true":
         conditions.append("hm_ind = 'Y'")
     elif hazmat == "false":
         conditions.append("hm_ind = 'N'")
 
-    # -- Carrier operation (A=Interstate, B=Intrastate HM, C=Intrastate non-HM)
     if filters.get("carrier_operation"):
         _cop = filters["carrier_operation"]
         ops_raw = [o.strip() for o in (_cop if isinstance(_cop, list) else _cop.split(","))]
@@ -850,7 +833,6 @@ async def fetch_carriers(filters: dict) -> dict:
             params.extend(op_codes)
             idx += len(op_codes)
 
-    # -- Classification (classdef: semicolon-separated string)
     if filters.get("classification"):
         _cls = filters["classification"]
         classes = [c.strip() for c in (_cls if isinstance(_cls, list) else _cls.split(",")) if c.strip()]
@@ -863,7 +845,6 @@ async def fetch_carriers(filters: dict) -> dict:
         if class_conds:
             conditions.append(f"({' OR '.join(class_conds)})")
 
-    # -- Cargo types (crgo_* columns, 'X' = active)
     if filters.get("cargo"):
         _crg = filters["cargo"]
         cargo_types = [c.strip() for c in (_crg if isinstance(_crg, list) else _crg.split(",")) if c.strip()]
@@ -875,7 +856,6 @@ async def fetch_carriers(filters: dict) -> dict:
         if cargo_conds:
             conditions.append(f"({' OR '.join(cargo_conds)})")
 
-    # -- Power units range
     if filters.get("power_units_min"):
         conditions.append(f"NULLIF(power_units, '')::int >= ${idx}")
         params.append(int(filters["power_units_min"]))
@@ -885,7 +865,6 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["power_units_max"]))
         idx += 1
 
-    # -- Drivers range
     if filters.get("drivers_min"):
         conditions.append(f"NULLIF(total_drivers, '')::int >= ${idx}")
         params.append(int(filters["drivers_min"]))
@@ -895,9 +874,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["drivers_max"]))
         idx += 1
 
-    # -- Years in business (mcs150_date stored as 'YYYYMMDD HHmm' string)
     if filters.get("years_in_business_min"):
-        from datetime import date as _date
         cutoff = _date.today().replace(year=_date.today().year - int(filters["years_in_business_min"]))
         cutoff_str = cutoff.strftime("%Y%m%d")
         conditions.append(
@@ -907,7 +884,6 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(cutoff_str)
         idx += 1
     if filters.get("years_in_business_max"):
-        from datetime import date as _date
         cutoff = _date.today().replace(year=_date.today().year - int(filters["years_in_business_max"]))
         cutoff_str = cutoff.strftime("%Y%m%d")
         conditions.append(
@@ -917,7 +893,6 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(cutoff_str)
         idx += 1
 
-    # -- Safety rating
     if filters.get("safety_rating"):
         conditions.append(f"safety_rating ILIKE ${idx}")
         params.append(f"%{filters['safety_rating']}%")
@@ -965,18 +940,14 @@ async def fetch_carriers(filters: dict) -> dict:
         count_query = f"SELECT COUNT(*) AS cnt FROM carriers {where}"
         count_params = params
 
-try:
+    try:
         async with pool.acquire() as conn:
-            # 1. Start a transaction so 'SET LOCAL' is valid
+            # FIX: Use transaction block for SET LOCAL and execute sequentially
             async with conn.transaction():
-                # Increase memory for this specific search/sort operation
                 await conn.execute("SET LOCAL work_mem = '128MB'")
-                
-                # 2. Execute sequentially, NOT with asyncio.gather, 
-                # because a single connection cannot handle two queries at once.
                 rows = await conn.fetch(data_query, *params)
                 count_row = await conn.fetchrow(count_query, *count_params)
-
+                
         filtered_count = count_row["cnt"] if count_row else 0
         return {
             "data": [_carrier_row_to_dict(row) for row in rows],
@@ -985,7 +956,8 @@ try:
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
-        
+
+
 async def delete_carrier(mc_number: str) -> bool:
     pool = get_pool()
     try:
