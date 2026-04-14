@@ -19,10 +19,80 @@ _DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 
 _SCHEMA_SQL = """
+
+-- TABLE 1: CARRIERS
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS carriers (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    mc_number TEXT NOT NULL UNIQUE,
+    dot_number TEXT NOT NULL,
+    legal_name TEXT NOT NULL,
+    dba_name TEXT,
+    entity_type TEXT,
+    status TEXT,
+    email TEXT,
+    phone TEXT,
+    power_units TEXT,
+    drivers TEXT,
+    non_cmv_units TEXT,
+    physical_address TEXT,
+    mailing_address TEXT,
+    date_scraped TEXT,
+    mcs150_date TEXT,
+    mcs150_mileage TEXT,
+    operation_classification TEXT[],
+    carrier_operation TEXT[],
+    cargo_carried TEXT[],
+    out_of_service_date TEXT,
+    state_carrier_id TEXT,
+    duns_number TEXT,
+    safety_rating TEXT,
+    safety_rating_date TEXT,
+    basic_scores JSONB,
+    oos_rates JSONB,
+    insurance_policies JSONB,
+    crashes JSONB,
+    inspections JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+-- Create indexes for carriers table
+CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_created_at ON carriers(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_status ON carriers(status);
+-- Enable RLS for carriers
+ALTER TABLE carriers ENABLE ROW LEVEL SECURITY;
+-- RLS Policies for carriers table
+DROP POLICY IF EXISTS "Enable read access for anonymous users" ON carriers;
+DROP POLICY IF EXISTS "Enable all access for authenticated users" ON carriers;
+CREATE POLICY "Enable read access for anonymous users" ON carriers
+    FOR SELECT
+    USING (true);
+CREATE POLICY "Enable all access for authenticated users" ON carriers
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+    
 -- ── Tables ──────────────────────────────────────────────────────────────────
 -- NOTE: carriers table is now populated from the Company Census File (az4n-8mr2)
 -- with ~4.4M records.  The table already exists in the database so we do NOT
 -- try to CREATE it here.  The schema is managed externally.
+
+CREATE TABLE IF NOT EXISTS insurance_history (
+    id SERIAL PRIMARY KEY,
+    docket_number TEXT NOT NULL, -- Links to carriers.docket1 or new_ventures.docket_number
+    ins_type_desc TEXT,          -- BIPD, Cargo, Bond, etc.
+    max_cov_amount TEXT,         -- Stored as string to match your int($1)*1000 logic
+    policy_no TEXT,
+    effective_date TEXT,
+    name_company TEXT,           -- The insurance provider name
+    ins_form_code TEXT,
+    trans_date TEXT,
+    underl_lim_amount TEXT,
+    cancl_effective_date TEXT,   -- If present, status becomes "Cancelled"
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS fmcsa_register (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
