@@ -62,7 +62,65 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
     blocked_by TEXT
 );
 
+-- ── Indexes ─────────────────────────────────────────────────────────────────
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_created_at ON carriers(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_status ON carriers(status);
+
+-- Trigram indexes for fast ILIKE text search on carriers
+CREATE INDEX IF NOT EXISTS idx_carriers_legal_name_trgm ON carriers USING gin (legal_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_carriers_mc_number_trgm ON carriers USING gin (mc_number gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_trgm ON carriers USING gin (dot_number gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS idx_fmcsa_register_number ON fmcsa_register(number);
+CREATE INDEX IF NOT EXISTS idx_fmcsa_register_date_fetched ON fmcsa_register(date_fetched DESC);
+CREATE INDEX IF NOT EXISTS idx_fmcsa_register_category ON fmcsa_register(category);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
+
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type ON insurance_history(docket_number, ins_type_desc);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_cancl ON insurance_history(docket_number, cancl_effective_date);
+
+-- Expression index for fast insurance join (avoids per-row concatenation)
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_key ON carriers((docket1prefix || docket1));
+
+-- Partial indexes for common boolean-style filters
+CREATE INDEX IF NOT EXISTS idx_carriers_has_email ON carriers(id DESC) WHERE email_address IS NOT NULL AND email_address != '';
+CREATE INDEX IF NOT EXISTS idx_carriers_active_id ON carriers(id DESC) WHERE status_code = 'A';
+
+-- Power units / drivers as integer for range filters
+CREATE INDEX IF NOT EXISTS idx_carriers_power_units ON carriers((NULLIF(power_units, '')::int)) WHERE power_units IS NOT NULL AND power_units != '';
+CREATE INDEX IF NOT EXISTS idx_carriers_total_drivers ON carriers((NULLIF(total_drivers, '')::int)) WHERE total_drivers IS NOT NULL AND total_drivers != '';
+
+-- Composite indexes for common carrier search filter patterns
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status ON carriers(docket1_status_code);
+CREATE INDEX IF NOT EXISTS idx_carriers_status_id ON carriers(status_code, id DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status_id ON carriers(docket1_status_code, id DESC);
+CREATE INDEX IF NOT EXISTS idx_carriers_cargo_genfreight ON carriers(crgo_genfreight) WHERE crgo_genfreight = 'X';
+CREATE INDEX IF NOT EXISTS idx_carriers_hm_ind ON carriers(hm_ind) WHERE hm_ind = 'Y';
+CREATE INDEX IF NOT EXISTS idx_carriers_carrier_op ON carriers(carrier_operation);
+CREATE INDEX IF NOT EXISTS idx_carriers_phy_state ON carriers(phy_state);
+
+-- Trigram index on classdef for fast classification ILIKE searches
+CREATE INDEX IF NOT EXISTS idx_carriers_classdef_trgm ON carriers USING gin (classdef gin_trgm_ops);
+-- B-tree on add_date for years-in-business string comparison
+CREATE INDEX IF NOT EXISTS idx_carriers_add_date ON carriers(add_date) WHERE add_date IS NOT NULL AND add_date != '';
+-- Composite for common status + carrier_operation filter combo
+CREATE INDEX IF NOT EXISTS idx_carriers_status_op ON carriers(status_code, carrier_operation);
+-- Composite index for insurance_history type + cancellation lookups
+CREATE INDEX IF NOT EXISTS idx_ih_docket_type_cancl ON insurance_history(docket_number, ins_type_desc, cancl_effective_date);
+-- Composite index for insurance_history effective date lookups
+CREATE INDEX IF NOT EXISTS idx_ih_docket_effective ON insurance_history(docket_number, effective_date);
+-- Composite index for insurance company name lookups
+CREATE INDEX IF NOT EXISTS idx_ih_docket_company ON insurance_history(docket_number, name_company);
 
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
