@@ -947,8 +947,10 @@ async def fetch_carriers(filters: dict) -> dict:
         et_upper = entity_type.upper()
         reverse_map = {v: k for k, v in _CARSHIP_MAP.items()}
         code = reverse_map.get(et_upper, et_upper)
-        conditions.append(f"c.carship ILIKE ${idx}")
-        params.append(f"%{code}%")
+        # Use exact match (=) instead of ILIKE with wildcards to leverage
+        # B-Tree index on carship – exponentially faster on 4.4M rows.
+        conditions.append(f"c.carship = ${idx}")
+        params.append(code)
         idx += 1
 
     active = filters.get("active")
@@ -1515,13 +1517,40 @@ async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
         print(f"[DB] Error updating safety for DOT {dot_number}: {e}")
         return False
 
+# Select only the columns actually used by _carrier_row_to_dict (shared
+# with fetch_carriers) to avoid fetching 100+ unused columns per row.
+_MC_RANGE_COLS = """id, dot_number, legal_name, dba_name,
+    phone, email_address, fax,
+    power_units, total_drivers,
+    phy_street, phy_city, phy_state, phy_zip, phy_country,
+    carrier_mailing_street, carrier_mailing_city,
+    carrier_mailing_state, carrier_mailing_zip, carrier_mailing_country,
+    mcs150_date, mcs150_mileage, mcs150_mileage_year,
+    classdef, carrier_operation, hm_ind,
+    dun_bradstreet_no, safety_rating, safety_rating_date,
+    status_code, carship,
+    docket1prefix, docket1, docket2prefix, docket2,
+    docket3prefix, docket3, docket1_status_code,
+    company_officer_1, company_officer_2,
+    fleetsize, add_date, truck_units, bus_units,
+    interstate_beyond_100_miles, interstate_within_100_miles,
+    intrastate_beyond_100_miles, intrastate_within_100_miles,
+    crgo_genfreight, crgo_household, crgo_metalsheet, crgo_motoveh,
+    crgo_drivetow, crgo_logpole, crgo_bldgmat, crgo_mobilehome,
+    crgo_machlrg, crgo_produce, crgo_liqgas, crgo_intermodal,
+    crgo_passengers, crgo_oilfield, crgo_livestock, crgo_grainfeed,
+    crgo_coalcoke, crgo_meat, crgo_garbage, crgo_usmail,
+    crgo_chem, crgo_drybulk, crgo_coldfood, crgo_beverages,
+    crgo_paperprod, crgo_utility, crgo_farmsupp, crgo_construct,
+    crgo_waterwell, crgo_cargoothr, crgo_cargoothr_desc"""
+
 async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
     """Fetch carriers whose docket1 number falls within start_mc..end_mc."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
-            """
-            SELECT * FROM carriers
+            f"""
+            SELECT {_MC_RANGE_COLS} FROM carriers
             WHERE docket1 IS NOT NULL
               AND docket1 ~ '^[0-9]+$'
               AND docket1::bigint BETWEEN $1 AND $2
