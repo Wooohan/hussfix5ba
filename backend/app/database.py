@@ -17,7 +17,6 @@ _dashboard_cache: Optional[dict] = None
 _dashboard_cache_ts: float = 0.0
 _DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
-
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
 -- NOTE: carriers table is now populated from the Company Census File (az4n-8mr2)
@@ -61,66 +60,6 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
     blocked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     blocked_by TEXT
 );
-
--- ── Indexes ─────────────────────────────────────────────────────────────────
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_created_at ON carriers(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_carriers_status ON carriers(status);
-
--- Trigram indexes for fast ILIKE text search on carriers
-CREATE INDEX IF NOT EXISTS idx_carriers_legal_name_trgm ON carriers USING gin (legal_name gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_carriers_mc_number_trgm ON carriers USING gin (mc_number gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_trgm ON carriers USING gin (dot_number gin_trgm_ops);
-
-CREATE INDEX IF NOT EXISTS idx_fmcsa_register_number ON fmcsa_register(number);
-CREATE INDEX IF NOT EXISTS idx_fmcsa_register_date_fetched ON fmcsa_register(date_fetched DESC);
-CREATE INDEX IF NOT EXISTS idx_fmcsa_register_category ON fmcsa_register(category);
-
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
-CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
-
-CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip_address);
-
-CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
-CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_type ON insurance_history(docket_number, ins_type_desc);
-CREATE INDEX IF NOT EXISTS idx_insurance_history_docket_cancl ON insurance_history(docket_number, cancl_effective_date);
-
--- Expression index for fast insurance join (avoids per-row concatenation)
-CREATE INDEX IF NOT EXISTS idx_carriers_docket1_key ON carriers((docket1prefix || docket1));
-
--- Partial indexes for common boolean-style filters
-CREATE INDEX IF NOT EXISTS idx_carriers_has_email ON carriers(id DESC) WHERE email_address IS NOT NULL AND email_address != '';
-CREATE INDEX IF NOT EXISTS idx_carriers_active_id ON carriers(id DESC) WHERE status_code = 'A';
-
--- Power units / drivers as integer for range filters
-CREATE INDEX IF NOT EXISTS idx_carriers_power_units ON carriers((NULLIF(power_units, '')::int)) WHERE power_units IS NOT NULL AND power_units != '';
-CREATE INDEX IF NOT EXISTS idx_carriers_total_drivers ON carriers((NULLIF(total_drivers, '')::int)) WHERE total_drivers IS NOT NULL AND total_drivers != '';
-
--- Composite indexes for common carrier search filter patterns
-CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status ON carriers(docket1_status_code);
-CREATE INDEX IF NOT EXISTS idx_carriers_status_id ON carriers(status_code, id DESC);
-CREATE INDEX IF NOT EXISTS idx_carriers_docket1_status_id ON carriers(docket1_status_code, id DESC);
-CREATE INDEX IF NOT EXISTS idx_carriers_cargo_genfreight ON carriers(crgo_genfreight) WHERE crgo_genfreight = 'X';
-CREATE INDEX IF NOT EXISTS idx_carriers_hm_ind ON carriers(hm_ind) WHERE hm_ind = 'Y';
-CREATE INDEX IF NOT EXISTS idx_carriers_carrier_op ON carriers(carrier_operation);
-CREATE INDEX IF NOT EXISTS idx_carriers_phy_state ON carriers(phy_state);
-
--- Trigram index on classdef for fast classification ILIKE searches
-CREATE INDEX IF NOT EXISTS idx_carriers_classdef_trgm ON carriers USING gin (classdef gin_trgm_ops);
--- B-tree on add_date for years-in-business string comparison
-CREATE INDEX IF NOT EXISTS idx_carriers_add_date ON carriers(add_date) WHERE add_date IS NOT NULL AND add_date != '';
--- Composite for common status + carrier_operation filter combo
-CREATE INDEX IF NOT EXISTS idx_carriers_status_op ON carriers(status_code, carrier_operation);
--- Composite index for insurance_history type + cancellation lookups
-CREATE INDEX IF NOT EXISTS idx_ih_docket_type_cancl ON insurance_history(docket_number, ins_type_desc, cancl_effective_date);
--- Composite index for insurance_history effective date lookups
-CREATE INDEX IF NOT EXISTS idx_ih_docket_effective ON insurance_history(docket_number, effective_date);
--- Composite index for insurance company name lookups
-CREATE INDEX IF NOT EXISTS idx_ih_docket_company ON insurance_history(docket_number, name_company);
 
 -- ── Timestamp triggers ──────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION update_carriers_updated_at()
@@ -315,23 +254,6 @@ CREATE TABLE IF NOT EXISTS new_ventures (
     UNIQUE(dot_number, add_date)
 );
 
-CREATE INDEX IF NOT EXISTS idx_new_ventures_dot_number ON new_ventures(dot_number);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_docket_number ON new_ventures(docket_number);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_add_date ON new_ventures(add_date);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_name ON new_ventures(name);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_phy_st ON new_ventures(phy_st);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_operating_status ON new_ventures(operating_status);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_created_at ON new_ventures(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_email ON new_ventures(email_address);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_hm_ind ON new_ventures(hm_ind);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_carrier_op ON new_ventures(carrier_operation);
-
--- Trigram indexes for fast ILIKE text search on new_ventures
-CREATE INDEX IF NOT EXISTS idx_new_ventures_name_trgm ON new_ventures USING gin (name gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_name_dba_trgm ON new_ventures USING gin (name_dba gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_dot_trgm ON new_ventures USING gin (dot_number gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_new_ventures_docket_trgm ON new_ventures USING gin (docket_number gin_trgm_ops);
-
 CREATE OR REPLACE FUNCTION update_new_ventures_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
 
@@ -344,7 +266,6 @@ INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extrac
 VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
 ON CONFLICT (email) DO NOTHING;
 """
-
 
 async def connect_db() -> None:
     global _pool
@@ -359,7 +280,6 @@ async def connect_db() -> None:
     except Exception as e:
         print(f"[DB] Connected to PostgreSQL, pool created (schema init skipped: {e})")
 
-
 async def close_db() -> None:
     global _pool
     if _pool:
@@ -367,12 +287,10 @@ async def close_db() -> None:
     _pool = None
     print("[DB] PostgreSQL connection pool closed")
 
-
 def get_pool() -> asyncpg.Pool:
     if _pool is None:
         raise RuntimeError("Database not connected. Call connect_db() first.")
     return _pool
-
 
 async def upsert_carrier(record: dict) -> bool:
     """Upsert a carrier using Census File column names.
@@ -463,7 +381,6 @@ async def upsert_carrier(record: dict) -> bool:
         print(f"[DB] Error upserting carrier DOT {dot}: {e}")
         return False
 
-
 async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
     """Insurance data is now in the separate insurance_history table.
 
@@ -473,7 +390,6 @@ async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
     print(f"[DB] update_carrier_insurance called for DOT {dot_number} – "
           "insurance is managed via insurance_history table, skipping.")
     return True
-
 
 async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) -> dict:
     pool = get_pool()
@@ -517,7 +433,6 @@ async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) 
 
     return {"success": True, "saved": saved, "skipped": skipped}
 
-
 async def fetch_fmcsa_register_by_date(
     extracted_date: str,
     category: Optional[str] = None,
@@ -551,14 +466,12 @@ async def fetch_fmcsa_register_by_date(
     rows = await pool.fetch(query, *params)
     return [dict(row) for row in rows]
 
-
 async def get_fmcsa_extracted_dates() -> list[str]:
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT DISTINCT date_fetched FROM fmcsa_register ORDER BY date_fetched DESC"
     )
     return [row["date_fetched"] for row in rows]
-
 
 def _parse_jsonb(value) -> Optional[object]:
     if value is None:
@@ -569,7 +482,6 @@ def _parse_jsonb(value) -> Optional[object]:
         except (json.JSONDecodeError, TypeError):
             return value
     return value
-
 
 def _format_insurance_history(raw_filings) -> list[dict]:
     if not raw_filings:
@@ -596,7 +508,6 @@ def _format_insurance_history(raw_filings) -> list[dict]:
             "status": "Cancelled" if cancl else "Active",
         })
     return results
-
 
 _CARGO_COL_MAP = {
     "crgo_genfreight": "General Freight",
@@ -653,7 +564,6 @@ _CARSHIP_MAP = {
     "T": "CARGO TANK FACILITY",
 }
 
-
 def _build_mc_number(d: dict) -> str:
     """Build a display MC/MX/FF number from all docket fields.
 
@@ -670,14 +580,12 @@ def _build_mc_number(d: dict) -> str:
             parts.append(number)
     return ", ".join(parts)
 
-
 def _build_address(street: str, city: str, state: str, zipcode: str, country: str = "") -> str:
     parts = [p for p in [street, city, state, zipcode] if p]
     addr = ", ".join(parts)
     if country and country != "US":
         addr = f"{addr}, {country}" if addr else country
     return addr
-
 
 def _parse_carship(raw: str) -> str:
     """Convert semicolon-separated carship codes to labels."""
@@ -686,7 +594,6 @@ def _parse_carship(raw: str) -> str:
     codes = [c.strip() for c in raw.split(";")]
     labels = [_CARSHIP_MAP.get(c, c) for c in codes]
     return " / ".join(labels)
-
 
 def _build_cargo_list(d: dict) -> list[str]:
     """Build a list of human-readable cargo types from crgo_* columns."""
@@ -703,7 +610,6 @@ def _build_cargo_list(d: dict) -> list[str]:
         result.append(other_desc.strip())
     return result
 
-
 def _format_mcs150_date(raw: str) -> str:
     """Convert Census mcs150_date (e.g. '20130729 2240') to MM/DD/YYYY."""
     if not raw:
@@ -712,7 +618,6 @@ def _format_mcs150_date(raw: str) -> str:
     if len(date_part) == 8 and date_part.isdigit():
         return f"{date_part[4:6]}/{date_part[6:8]}/{date_part[:4]}"
     return raw
-
 
 def _carrier_row_to_dict(row) -> dict:
     """Map a Census-schema carriers row to the API response format.
@@ -821,7 +726,6 @@ def _carrier_row_to_dict(row) -> dict:
     result["insurance_history_filings"] = []
 
     return result
-
 
 async def fetch_carriers(filters: dict) -> dict:
     """Fetch carriers from the Census-schema carriers table.
@@ -1381,7 +1285,6 @@ async def fetch_carriers(filters: dict) -> dict:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
 
-
 async def delete_carrier(dot_number: str) -> bool:
     """Delete a carrier by DOT number (Census schema uses dot_number as key)."""
     pool = get_pool()
@@ -1395,7 +1298,6 @@ async def delete_carrier(dot_number: str) -> bool:
         print(f"[DB] Error deleting carrier DOT {dot_number}: {e}")
         return False
 
-
 async def get_carrier_count() -> int:
     """Fast estimated count using pg_class reltuples (instant on large tables)."""
     pool = get_pool()
@@ -1403,7 +1305,6 @@ async def get_carrier_count() -> int:
         "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
     )
     return row["cnt"] if row else 0
-
 
 async def get_carrier_dashboard_stats() -> dict:
     """Dashboard statistics for Census data (cached for 5 minutes)."""
@@ -1444,7 +1345,6 @@ async def get_carrier_dashboard_stats() -> dict:
         print(f"[DB] Error fetching dashboard stats: {e}")
         return _dashboard_cache or {}
 
-
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
     """Update safety-related fields for a carrier by DOT number."""
     pool = get_pool()
@@ -1464,7 +1364,6 @@ async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
     except Exception as e:
         print(f"[DB] Error updating safety for DOT {dot_number}: {e}")
         return False
-
 
 async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
     """Fetch carriers whose docket1 number falls within start_mc..end_mc."""
@@ -1487,8 +1386,6 @@ async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
         print(f"[DB] Error fetching MC range: {e}")
         return []
 
-
-
 def _user_row_to_dict(row) -> dict:
     d = dict(row)
     d.pop("password_hash", None)
@@ -1498,7 +1395,6 @@ def _user_row_to_dict(row) -> dict:
     if "id" in d and d["id"] is not None:
         d["id"] = str(d["id"])
     return d
-
 
 async def fetch_users() -> list[dict]:
     pool = get_pool()
@@ -1512,7 +1408,6 @@ async def fetch_users() -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching users: {e}")
         return []
-
 
 async def fetch_user_by_email(email: str) -> Optional[dict]:
     pool = get_pool()
@@ -1529,7 +1424,6 @@ async def fetch_user_by_email(email: str) -> Optional[dict]:
     except Exception as e:
         print(f"[DB] Error fetching user by email: {e}")
         return None
-
 
 async def create_user(user_data: dict) -> Optional[dict]:
     pool = get_pool()
@@ -1562,7 +1456,6 @@ async def create_user(user_data: dict) -> Optional[dict]:
         print(f"[DB] Error creating user: {e}")
         return None
 
-
 async def update_user(user_id: str, user_data: dict) -> bool:
     pool = get_pool()
     _ALLOWED_COLUMNS = {
@@ -1587,7 +1480,6 @@ async def update_user(user_id: str, user_data: dict) -> bool:
         print(f"[DB] Error updating user {user_id}: {e}")
         return False
 
-
 async def delete_user(user_id: str) -> bool:
     pool = get_pool()
     try:
@@ -1598,7 +1490,6 @@ async def delete_user(user_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting user {user_id}: {e}")
         return False
-
 
 async def get_user_password_hash(email: str) -> Optional[str]:
     pool = get_pool()
@@ -1613,7 +1504,6 @@ async def get_user_password_hash(email: str) -> Optional[str]:
         print(f"[DB] Error fetching password hash: {e}")
         return None
 
-
 async def fetch_blocked_ips() -> list[dict]:
     pool = get_pool()
     try:
@@ -1624,7 +1514,6 @@ async def fetch_blocked_ips() -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching blocked IPs: {e}")
         return []
-
 
 async def block_ip(ip_address: str, reason: str) -> bool:
     pool = get_pool()
@@ -1643,7 +1532,6 @@ async def block_ip(ip_address: str, reason: str) -> bool:
         print(f"[DB] Error blocking IP {ip_address}: {e}")
         return False
 
-
 async def unblock_ip(ip_address: str) -> bool:
     pool = get_pool()
     try:
@@ -1654,7 +1542,6 @@ async def unblock_ip(ip_address: str) -> bool:
     except Exception as e:
         print(f"[DB] Error unblocking IP {ip_address}: {e}")
         return False
-
 
 async def is_ip_blocked(ip_address: str) -> bool:
     pool = get_pool()
@@ -1668,7 +1555,6 @@ async def is_ip_blocked(ip_address: str) -> bool:
         print(f"[DB] Error checking IP block status: {e}")
         return False
 
-
 async def get_fmcsa_categories() -> list[str]:
     pool = get_pool()
     try:
@@ -1679,7 +1565,6 @@ async def get_fmcsa_categories() -> list[str]:
     except Exception as e:
         print(f"[DB] Error fetching FMCSA categories: {e}")
         return []
-
 
 async def delete_fmcsa_entries_before_date(date: str) -> int:
     pool = get_pool()
@@ -1693,12 +1578,10 @@ async def delete_fmcsa_entries_before_date(date: str) -> int:
         print(f"[DB] Error deleting FMCSA entries: {e}")
         return 0
 
-
 def _to_jsonb(value) -> Optional[str]:
     if value is None:
         return None
     return json.dumps(value)
-
 
 _NV_COLUMNS = [
     "dot_number", "prefix", "docket_number", "status_code", "carship",
@@ -1741,7 +1624,6 @@ _NV_COLUMNS = [
     "phy_ups_store", "mai_ups_store", "phy_mail_box", "mai_mail_box",
 ]
 
-
 def _new_venture_row_to_dict(row) -> dict:
     d = dict(row)
     if "raw_data" in d:
@@ -1752,7 +1634,6 @@ def _new_venture_row_to_dict(row) -> dict:
     if "id" in d and d["id"] is not None:
         d["id"] = str(d["id"])
     return d
-
 
 async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dict:
     pool = get_pool()
@@ -1798,7 +1679,6 @@ async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dic
         skipped = len(entries) - saved
 
     return {"success": True, "saved": saved, "skipped": skipped}
-
 
 async def fetch_new_ventures(filters: dict) -> list[dict]:
     pool = get_pool()
@@ -1969,7 +1849,6 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         print(f"[DB] Error fetching new ventures: {e}")
         return {"data": [], "filtered_count": 0, "total_count": 0, "available_dates": []}
 
-
 async def get_new_venture_count() -> int:
     pool = get_pool()
     try:
@@ -1978,7 +1857,6 @@ async def get_new_venture_count() -> int:
     except Exception as e:
         print(f"[DB] Error getting new venture count: {e}")
         return 0
-
 
 async def get_new_venture_scraped_dates() -> list[str]:
     pool = get_pool()
@@ -1991,7 +1869,6 @@ async def get_new_venture_scraped_dates() -> list[str]:
         print(f"[DB] Error fetching new venture dates: {e}")
         return []
 
-
 async def fetch_new_venture_by_id(record_id: str) -> dict | None:
     pool = get_pool()
     try:
@@ -2003,7 +1880,6 @@ async def fetch_new_venture_by_id(record_id: str) -> dict | None:
         print(f"[DB] Error fetching new venture {record_id}: {e}")
         return None
 
-
 async def delete_new_venture(record_id: str) -> bool:
     pool = get_pool()
     try:
@@ -2014,7 +1890,6 @@ async def delete_new_venture(record_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting new venture {record_id}: {e}")
         return False
-
 
 async def fetch_insurance_history(docket_number: str) -> list[dict]:
     """Fetch insurance history by docket_number (e.g. 'MC123456').
