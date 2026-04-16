@@ -5,6 +5,8 @@ import time as _time
 import asyncpg
 from typing import Optional
 
+from app import redis_cache as rc
+
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
     import warnings
@@ -12,7 +14,7 @@ if not DATABASE_URL:
 
 _pool: Optional[asyncpg.Pool] = None
 
-# ── Dashboard stat cache ────────────────────────────────────────────────────
+# ── Dashboard stat cache (in-memory fallback) ───────────────────────────────
 _dashboard_cache: Optional[dict] = None
 _dashboard_cache_ts: float = 0.0
 _DASHBOARD_CACHE_TTL = 300  # 5 minutes
@@ -526,6 +528,7 @@ async def upsert_carrier(record: dict) -> bool:
             record.get("docket1prefix"),
             record.get("docket1"),
         )
+        await rc.invalidate_carriers()
         return True
     except Exception as e:
         print(f"[DB] Error upserting carrier DOT {dot}: {e}")
@@ -581,6 +584,8 @@ async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) 
         print(f"[DB] Error batch-saving FMCSA entries: {e}")
         skipped = len(entries) - saved
 
+    if saved > 0:
+        await rc.invalidate_fmcsa()
     return {"success": True, "saved": saved, "skipped": skipped}
 
 async def fetch_fmcsa_register_by_date(
@@ -588,6 +593,9 @@ async def fetch_fmcsa_register_by_date(
     category: Optional[str] = None,
     search_term: Optional[str] = None,
 ) -> list[dict]:
+    cached = await rc.get_fmcsa_cache(extracted_date, category, search_term)
+    if cached is not None:
+        return cached
     pool = get_pool()
 
     conditions = ["date_fetched = $1"]
@@ -614,14 +622,21 @@ async def fetch_fmcsa_register_by_date(
     """
 
     rows = await pool.fetch(query, *params)
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    await rc.set_fmcsa_cache(extracted_date, category, search_term, result)
+    return result
 
 async def get_fmcsa_extracted_dates() -> list[str]:
+    cached = await rc.get_cached(rc.PREFIX_FMCSA_DATES)
+    if cached is not None:
+        return cached
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT DISTINCT date_fetched FROM fmcsa_register ORDER BY date_fetched DESC"
     )
-    return [row["date_fetched"] for row in rows]
+    dates = [row["date_fetched"] for row in rows]
+    await rc.set_cached(rc.PREFIX_FMCSA_DATES, dates, rc.TTL_MEDIUM)
+    return dates
 
 def _parse_jsonb(value) -> Optional[object]:
     if value is None:
@@ -898,7 +913,14 @@ async def fetch_carriers(filters: dict) -> dict:
     4. ``carrier_operation`` and ``state`` use ``= ANY($N)`` instead
        of N separate OR-clauses, letting PG use the B-tree index in a
        single pass.
+    5. Redis caching – identical filter sets return cached results
+       for up to 10 minutes, dramatically reducing DB load.
     """
+    # ── Redis cache check ────────────────────────────────────────────
+    cached = await rc.get_carriers_cache(filters)
+    if cached is not None:
+        return cached
+
     pool = get_pool()
 
     conditions: list[str] = []
@@ -1429,10 +1451,13 @@ async def fetch_carriers(filters: dict) -> dict:
                 if dk and dk in ih_map:
                     carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
 
-        return {
+        result = {
             "data": carrier_dicts,
             "filtered_count": filtered_count,
         }
+        # ── Store in Redis cache ─────────────────────────────────────
+        await rc.set_carriers_cache(filters, result)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
@@ -1445,22 +1470,39 @@ async def delete_carrier(dot_number: str) -> bool:
             "DELETE FROM carriers WHERE dot_number = $1",
             int(dot_number),
         )
-        return not result.endswith("0")
+        deleted = not result.endswith("0")
+        if deleted:
+            await rc.invalidate_carriers()
+        return deleted
     except Exception as e:
         print(f"[DB] Error deleting carrier DOT {dot_number}: {e}")
         return False
 
 async def get_carrier_count() -> int:
     """Fast estimated count using pg_class reltuples (instant on large tables)."""
+    cached = await rc.get_carrier_count_cache()
+    if cached is not None:
+        return cached
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
     )
-    return row["cnt"] if row else 0
+    count = row["cnt"] if row else 0
+    await rc.set_carrier_count_cache(count)
+    return count
 
 async def get_carrier_dashboard_stats() -> dict:
-    """Dashboard statistics for Census data (cached for 5 minutes)."""
+    """Dashboard statistics for Census data (cached in Redis + in-memory fallback)."""
     global _dashboard_cache, _dashboard_cache_ts
+
+    # ── Try Redis first ──────────────────────────────────────────────
+    redis_cached = await rc.get_dashboard_cache()
+    if redis_cached is not None:
+        _dashboard_cache = redis_cached
+        _dashboard_cache_ts = _time.time()
+        return redis_cached
+
+    # ── In-memory fallback ───────────────────────────────────────────
     now = _time.time()
     if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
         return _dashboard_cache
@@ -1492,6 +1534,7 @@ async def get_carrier_dashboard_stats() -> dict:
         }
         _dashboard_cache = result
         _dashboard_cache_ts = now
+        await rc.set_dashboard_cache(result)
         return result
     except Exception as e:
         print(f"[DB] Error fetching dashboard stats: {e}")
@@ -1546,6 +1589,9 @@ _MC_RANGE_COLS = """id, dot_number, legal_name, dba_name,
 
 async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
     """Fetch carriers whose docket1 number falls within start_mc..end_mc."""
+    cached = await rc.get_mc_range_cache(start_mc, end_mc)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -1560,7 +1606,9 @@ async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
             int(start_mc),
             int(end_mc),
         )
-        return [_carrier_row_to_dict(row) for row in rows]
+        result = [_carrier_row_to_dict(row) for row in rows]
+        await rc.set_mc_range_cache(start_mc, end_mc, result)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching MC range: {e}")
         return []
@@ -1629,6 +1677,7 @@ async def create_user(user_data: dict) -> Optional[dict]:
             user_data.get("is_blocked", False),
         )
         if row:
+            await rc.invalidate_users()
             return _user_row_to_dict(row)
         return None
     except Exception as e:
@@ -1654,7 +1703,10 @@ async def update_user(user_id: str, user_data: dict) -> bool:
     query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${len(values)}"
     try:
         result = await pool.execute(query, *values)
-        return not result.endswith("0")
+        updated = not result.endswith("0")
+        if updated:
+            await rc.invalidate_users()
+        return updated
     except Exception as e:
         print(f"[DB] Error updating user {user_id}: {e}")
         return False
@@ -1665,7 +1717,10 @@ async def delete_user(user_id: str) -> bool:
         result = await pool.execute(
             "DELETE FROM users WHERE user_id = $1", user_id
         )
-        return not result.endswith("0")
+        deleted = not result.endswith("0")
+        if deleted:
+            await rc.invalidate_users()
+        return deleted
     except Exception as e:
         print(f"[DB] Error deleting user {user_id}: {e}")
         return False
@@ -1706,6 +1761,7 @@ async def block_ip(ip_address: str, reason: str) -> bool:
             ip_address,
             reason or "No reason provided",
         )
+        await rc.invalidate_blocked_ips()
         return True
     except Exception as e:
         print(f"[DB] Error blocking IP {ip_address}: {e}")
@@ -1717,30 +1773,43 @@ async def unblock_ip(ip_address: str) -> bool:
         result = await pool.execute(
             "DELETE FROM blocked_ips WHERE ip_address = $1", ip_address
         )
-        return not result.endswith("0")
+        unblocked = not result.endswith("0")
+        if unblocked:
+            await rc.invalidate_blocked_ips()
+        return unblocked
     except Exception as e:
         print(f"[DB] Error unblocking IP {ip_address}: {e}")
         return False
 
 async def is_ip_blocked(ip_address: str) -> bool:
+    cached = await rc.get_ip_blocked_cache(ip_address)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow(
             "SELECT ip_address FROM blocked_ips WHERE ip_address = $1",
             ip_address,
         )
-        return row is not None
+        blocked = row is not None
+        await rc.set_ip_blocked_cache(ip_address, blocked)
+        return blocked
     except Exception as e:
         print(f"[DB] Error checking IP block status: {e}")
         return False
 
 async def get_fmcsa_categories() -> list[str]:
+    cached = await rc.get_cached(rc.PREFIX_FMCSA_CATEGORIES)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         rows = await pool.fetch(
             "SELECT DISTINCT category FROM fmcsa_register WHERE category IS NOT NULL ORDER BY category"
         )
-        return [row["category"] for row in rows]
+        categories = [row["category"] for row in rows]
+        await rc.set_cached(rc.PREFIX_FMCSA_CATEGORIES, categories, rc.TTL_VERY_LONG)
+        return categories
     except Exception as e:
         print(f"[DB] Error fetching FMCSA categories: {e}")
         return []
@@ -1752,7 +1821,10 @@ async def delete_fmcsa_entries_before_date(date: str) -> int:
             "DELETE FROM fmcsa_register WHERE date_fetched < $1", date
         )
         parts = result.split(" ")
-        return int(parts[-1]) if len(parts) > 1 else 0
+        count = int(parts[-1]) if len(parts) > 1 else 0
+        if count > 0:
+            await rc.invalidate_fmcsa()
+        return count
     except Exception as e:
         print(f"[DB] Error deleting FMCSA entries: {e}")
         return 0
@@ -1857,9 +1929,14 @@ async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dic
         print(f"[DB] Error batch-saving new venture entries: {e}")
         skipped = len(entries) - saved
 
+    if saved > 0:
+        await rc.invalidate_new_ventures()
     return {"success": True, "saved": saved, "skipped": skipped}
 
 async def fetch_new_ventures(filters: dict) -> list[dict]:
+    cached = await rc.get_new_ventures_cache(filters)
+    if cached is not None:
+        return cached
     pool = get_pool()
 
     conditions: list[str] = []
@@ -2018,32 +2095,44 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         available_dates = [r["add_date"] for r in date_rows]
         total_row = await pool.fetchrow(total_query)
         total_count = total_row["cnt"] if total_row else 0
-        return {
+        result = {
             "data": [_new_venture_row_to_dict(row) for row in rows],
             "filtered_count": filtered_count,
             "total_count": total_count,
             "available_dates": available_dates,
         }
+        await rc.set_new_ventures_cache(filters, result)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching new ventures: {e}")
         return {"data": [], "filtered_count": 0, "total_count": 0, "available_dates": []}
 
 async def get_new_venture_count() -> int:
+    cached = await rc.get_cached(rc.PREFIX_NV_COUNT)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM new_ventures")
-        return row["cnt"] if row else 0
+        count = row["cnt"] if row else 0
+        await rc.set_cached(rc.PREFIX_NV_COUNT, count, rc.TTL_MEDIUM)
+        return count
     except Exception as e:
         print(f"[DB] Error getting new venture count: {e}")
         return 0
 
 async def get_new_venture_scraped_dates() -> list[str]:
+    cached = await rc.get_cached(rc.PREFIX_NV_DATES)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         rows = await pool.fetch(
             "SELECT DISTINCT add_date FROM new_ventures WHERE add_date IS NOT NULL ORDER BY add_date DESC"
         )
-        return [row["add_date"] for row in rows]
+        dates = [row["add_date"] for row in rows]
+        await rc.set_cached(rc.PREFIX_NV_DATES, dates, rc.TTL_MEDIUM)
+        return dates
     except Exception as e:
         print(f"[DB] Error fetching new venture dates: {e}")
         return []
@@ -2065,7 +2154,10 @@ async def delete_new_venture(record_id: str) -> bool:
         result = await pool.execute(
             "DELETE FROM new_ventures WHERE id = $1", record_id
         )
-        return not result.endswith("0")
+        deleted = not result.endswith("0")
+        if deleted:
+            await rc.invalidate_new_ventures()
+        return deleted
     except Exception as e:
         print(f"[DB] Error deleting new venture {record_id}: {e}")
         return False
@@ -2076,6 +2168,9 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
     The frontend passes the raw docket_number value which is already
     in the format stored in insurance_history (docket1prefix || docket1).
     """
+    cached = await rc.get_insurance_cache(docket_number)
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -2110,6 +2205,7 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
                 "canclEffectiveDate": cancl,
                 "status": "Cancelled" if cancl else "Active",
             })
+        await rc.set_insurance_cache(docket_number, results)
         return results
     except Exception as e:
         print(f"[DB] Error fetching insurance history for {docket_number}: {e}")
