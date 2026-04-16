@@ -1,4 +1,21 @@
+import os
+import json
+import asyncio
+import time as _time
+import asyncpg
+from typing import Optional
 
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if not DATABASE_URL:
+    import warnings
+    warnings.warn("DATABASE_URL is not set. Database connections will fail.")
+
+_pool: Optional[asyncpg.Pool] = None
+
+# ── Dashboard stat cache ────────────────────────────────────────────────────
+_dashboard_cache: Optional[dict] = None
+_dashboard_cache_ts: float = 0.0
+_DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
