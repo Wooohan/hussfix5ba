@@ -19,7 +19,6 @@ from app.task_manager import task_manager
 from app.fmcsa_register import scrape_fmcsa_register
 from app.broker_snapshot import scrape_broker_snapshot
 from app.auth import create_token, verify_token, require_auth
-from app.redis_cache import connect_redis, close_redis
 from app.database import (
     connect_db, close_db,
     upsert_carrier, fetch_carriers, delete_carrier as db_delete_carrier,
@@ -37,12 +36,10 @@ from app.database import (
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    await connect_redis()
     await connect_db()
     yield
     await close_clients()
     await close_db()
-    await close_redis()
 app = FastAPI(lifespan=lifespan)
 _PUBLIC_PATHS: set[str] = {
     "/health",
@@ -781,36 +778,3 @@ async def api_delete_new_venture(record_id: str, request: Request):
 async def api_get_insurance_history(docket_number: str):
     policies = await fetch_insurance_history(docket_number)
     return {"success": True, "docket_number": docket_number, "policies": policies, "count": len(policies)}
-
-
-# ── Redis cache management endpoints ────────────────────────────────────────
-@app.get("/api/cache/status")
-async def api_cache_status(request: Request):
-    """Check if Redis caching is active."""
-    from app.redis_cache import is_available, _redis
-    status = {"enabled": is_available()}
-    if is_available() and _redis:
-        try:
-            info = await _redis.info("memory")
-            status["used_memory_human"] = info.get("used_memory_human", "N/A")
-            status["connected_clients"] = (await _redis.info("clients")).get("connected_clients", "N/A")
-            db_size = await _redis.dbsize()
-            status["total_keys"] = db_size
-        except Exception as e:
-            status["error"] = str(e)
-    return status
-
-
-@app.post("/api/cache/flush")
-async def api_cache_flush(request: Request):
-    """Flush all cache keys (admin only)."""
-    if not _require_admin(request):
-        return JSONResponse(status_code=403, content={"error": "Admin access required"})
-    from app import redis_cache as rc
-    if not rc.is_available():
-        return {"success": False, "message": "Redis not connected"}
-    try:
-        await rc._redis.flushdb()
-        return {"success": True, "message": "All cache keys flushed"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
