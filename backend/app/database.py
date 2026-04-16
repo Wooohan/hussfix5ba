@@ -3,19 +3,113 @@ import json
 import asyncio
 import time as _time
 import asyncpg
+import redis
 from typing import Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-if not DATABASE_URL:
-    import warnings
-    warnings.warn("DATABASE_URL is not set. Database connections will fail.")
+# ── Connections ─────────────────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:lSjqcrLrbsdecCWeauRSPXQqOmBGbAXm@monorail.proxy.rlwy.net:44889/railway")
+REDIS_URL = os.getenv("REDIS_URL", "redis://default:aISowepyJUSwNtlQjefchiXtOotOlaps@nozomi.proxy.rlwy.net:24347")
 
 _pool: Optional[asyncpg.Pool] = None
 
-# ── Dashboard stat cache ────────────────────────────────────────────────────
-_dashboard_cache: Optional[dict] = None
-_dashboard_cache_ts: float = 0.0
-_DASHBOARD_CACHE_TTL = 300  # 5 minutes
+# Initialize Redis (decode_responses=True so we handle strings, not bytes)
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    print("[REDIS] Connected successfully")
+except Exception as e:
+    print(f"[REDIS] Connection failed: {e}")
+    redis_client = None
+
+# ── Pool Management ─────────────────────────────────────────────────────────
+async def get_pool():
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    return _pool
+
+# ── Core Fetch Logic (Optimized for 4.4M Records) ───────────────────────────
+async def fetch_carriers(filters: dict, page: int = 1, page_size: int = 50):
+    pool = await get_pool()
+    
+    # 1. Generate unique Cache Key
+    filter_hash = json.dumps(filters, sort_keys=True)
+    cache_key = f"carriers_v2:{filter_hash}:p{page}"
+
+    # 2. Check Redis Cache
+    if redis_client:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            print(f"[REDIS] Read Error: {e}")
+
+    # 3. Build Query
+    offset = (page - 1) * page_size
+    conditions = []
+    params = []
+
+    # Filter: Entity Type (CARSHIP)
+    if filters.get("entityType"):
+        params.append(filters["entityType"].strip()) # Exact match, no %
+        conditions.append(f"c.carship = ${len(params)}")
+
+    # Filter: Active/Inactive (Based on Authorized Status 'A')
+    active = filters.get("active")
+    if active == "true":
+        conditions.append("c.docket1_status_code = 'A'")
+    elif active == "false":
+        conditions.append("(c.docket1_status_code != 'A' OR c.docket1_status_code IS NULL)")
+
+    # Filter: US State
+    if filters.get("state"):
+        params.append(filters["state"].strip())
+        conditions.append(f"c.phy_state = ${len(params)}")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with pool.acquire() as conn:
+        # CAPPED COUNT: This is the secret to killing the 3.4s lag.
+        # We stop counting at 1001. If it hits 1001, we know there are 20+ pages.
+        count_sql = f"""
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM carriers c {where_clause} LIMIT 1001
+            ) as sub
+        """
+        
+        # DATA QUERY: Select only needed columns for the dashboard
+        data_sql = f"""
+            SELECT c.id, c.dot_number, c.legal_name, c.phy_city, c.phy_state, 
+                   c.carship, c.carrier_operation, c.docket1_status_code
+            FROM carriers c
+            {where_clause}
+            ORDER BY c.id DESC
+            LIMIT {page_size} OFFSET {offset}
+        """
+
+        # Execute both concurrently
+        total_count_task = conn.fetchval(count_sql, *params)
+        rows_task = conn.fetch(data_sql, *params)
+        
+        total_count, rows = await asyncio.gather(total_count_task, rows_task)
+
+        # Build results
+        carriers = [dict(r) for r in rows]
+        result = {
+            "carriers": carriers,
+            "total": total_count,
+            "page": page,
+            "totalPages": (total_count + page_size - 1) // page_size
+        }
+
+        # 4. Save to Redis (Cache for 10 minutes)
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, 600, json.dumps(result))
+            except Exception as e:
+                print(f"[REDIS] Write Error: {e}")
+
+        return result
 
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
