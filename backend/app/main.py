@@ -361,10 +361,26 @@ async def api_fetch_carriers(
     if carrier_operation: filters["carrier_operation"] = carrier_operation.split(",")
     if cargo: filters["cargo"] = cargo.split(",")
     if hazmat: filters["hazmat"] = hazmat
-    if power_units_min: filters["power_units_min"] = power_units_min
-    if power_units_max: filters["power_units_max"] = power_units_max
-    if drivers_min: filters["drivers_min"] = drivers_min
-    if drivers_max: filters["drivers_max"] = drivers_max
+    if power_units_min:
+        try:
+            filters["power_units_min"] = int(power_units_min)
+        except ValueError:
+            pass
+    if power_units_max:
+        try:
+            filters["power_units_max"] = int(power_units_max)
+        except ValueError:
+            pass
+    if drivers_min:
+        try:
+            filters["drivers_min"] = int(drivers_min)
+        except ValueError:
+            pass
+    if drivers_max:
+        try:
+            filters["drivers_max"] = int(drivers_max)
+        except ValueError:
+            pass
     if insurance_required: filters["insurance_required"] = insurance_required.split(",")
     if bipd_min: filters["bipd_min"] = bipd_min
     if bipd_max: filters["bipd_max"] = bipd_max
@@ -738,10 +754,26 @@ async def api_fetch_new_ventures(
     if has_email: filters["has_email"] = has_email
     if carrier_operation: filters["carrier_operation"] = carrier_operation
     if hazmat: filters["hazmat"] = hazmat
-    if power_units_min: filters["power_units_min"] = power_units_min
-    if power_units_max: filters["power_units_max"] = power_units_max
-    if drivers_min: filters["drivers_min"] = drivers_min
-    if drivers_max: filters["drivers_max"] = drivers_max
+    if power_units_min:
+        try:
+            filters["power_units_min"] = int(power_units_min)
+        except ValueError:
+            pass
+    if power_units_max:
+        try:
+            filters["power_units_max"] = int(power_units_max)
+        except ValueError:
+            pass
+    if drivers_min:
+        try:
+            filters["drivers_min"] = int(drivers_min)
+        except ValueError:
+            pass
+    if drivers_max:
+        try:
+            filters["drivers_max"] = int(drivers_max)
+        except ValueError:
+            pass
     if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
     if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
     if bond_on_file: filters["bond_on_file"] = bond_on_file
