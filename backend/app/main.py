@@ -392,8 +392,16 @@ async def api_fetch_carriers(
     if trust_fund_on_file: filters["trust_fund_on_file"] = trust_fund_on_file
     if ins_cancellation_date_from: filters["ins_cancellation_date_from"] = ins_cancellation_date_from
     if ins_cancellation_date_to: filters["ins_cancellation_date_to"] = ins_cancellation_date_to
-    if years_in_business_min: filters["years_in_business_min"] = years_in_business_min
-    if years_in_business_max: filters["years_in_business_max"] = years_in_business_max
+    if years_in_business_min:
+        try:
+            filters["years_in_business_min"] = int(years_in_business_min)
+        except ValueError:
+            pass
+    if years_in_business_max:
+        try:
+            filters["years_in_business_max"] = int(years_in_business_max)
+        except ValueError:
+            pass
     if oos_min: filters["oos_min"] = oos_min
     if oos_max: filters["oos_max"] = oos_max
     if crashes_min: filters["crashes_min"] = crashes_min
