@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS carriers (
     "COMPANY_OFFICER_2" text,
     "BUSINESS_ORG_DESC" text,
     "TRUCK_UNITS" text,
-    "POWER_UNITS" text,
+    "POWER_UNITS" integer,
     "BUS_UNITS" text,
     "FLEETSIZE" text,
     "REVIEW_ID" text,
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS carriers (
     "INTRASTATE_BEYOND_100_MILES" text,
     "INTRASTATE_WITHIN_100_MILES" text,
     "TOTAL_CDL" text,
-    "TOTAL_DRIVERS" text,
+    "TOTAL_DRIVERS" integer,
     "AVG_DRIVERS_LEASED_PER_MONTH" text,
     "CLASSDEF" text,
     "LEGAL_NAME" text,
@@ -363,7 +363,7 @@ CREATE TABLE IF NOT EXISTS new_ventures (
     trplimo_16 TEXT,
     total_trucks TEXT,
     total_buses TEXT,
-    total_pwr TEXT,
+    total_pwr INTEGER,
     fleetsize TEXT,
     inter_within_100 TEXT,
     inter_beyond_100 TEXT,
@@ -1036,21 +1036,21 @@ async def fetch_carriers(filters: dict) -> dict:
     elif hazmat == "false":
         conditions.append("(c.hm_ind IS NULL OR c.hm_ind != 'Y')")
 
-    if filters.get("power_units_min"):
-        conditions.append(f"NULLIF(c.power_units, '')::int >= ${idx}")
-        params.append(int(filters["power_units_min"]))
+    if filters.get("power_units_min") is not None:
+        conditions.append(f"c.power_units >= ${idx}")
+        params.append(filters["power_units_min"])
         idx += 1
-    if filters.get("power_units_max"):
-        conditions.append(f"NULLIF(c.power_units, '')::int <= ${idx}")
-        params.append(int(filters["power_units_max"]))
+    if filters.get("power_units_max") is not None:
+        conditions.append(f"c.power_units <= ${idx}")
+        params.append(filters["power_units_max"])
         idx += 1
-    if filters.get("drivers_min"):
-        conditions.append(f"NULLIF(c.total_drivers, '')::int >= ${idx}")
-        params.append(int(filters["drivers_min"]))
+    if filters.get("drivers_min") is not None:
+        conditions.append(f"c.total_drivers >= ${idx}")
+        params.append(filters["drivers_min"])
         idx += 1
-    if filters.get("drivers_max"):
-        conditions.append(f"NULLIF(c.total_drivers, '')::int <= ${idx}")
-        params.append(int(filters["drivers_max"]))
+    if filters.get("drivers_max") is not None:
+        conditions.append(f"c.total_drivers <= ${idx}")
+        params.append(filters["drivers_max"])
         idx += 1
 
     # ------------------------------------------------------------------
@@ -1950,22 +1950,22 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         elif filters["hazmat"] == "false":
             conditions.append("(hm_ind IS NULL OR hm_ind != 'Y')")
 
-    if filters.get("power_units_min"):
-        conditions.append(f"NULLIF(total_pwr, '')::int >= ${idx}")
-        params.append(int(filters["power_units_min"]))
+    if filters.get("power_units_min") is not None:
+        conditions.append(f"total_pwr >= ${idx}")
+        params.append(filters["power_units_min"])
         idx += 1
-    if filters.get("power_units_max"):
-        conditions.append(f"NULLIF(total_pwr, '')::int <= ${idx}")
-        params.append(int(filters["power_units_max"]))
+    if filters.get("power_units_max") is not None:
+        conditions.append(f"total_pwr <= ${idx}")
+        params.append(filters["power_units_max"])
         idx += 1
 
-    if filters.get("drivers_min"):
-        conditions.append(f"NULLIF(total_drivers, '')::int >= ${idx}")
-        params.append(int(filters["drivers_min"]))
+    if filters.get("drivers_min") is not None:
+        conditions.append(f"total_drivers >= ${idx}")
+        params.append(filters["drivers_min"])
         idx += 1
-    if filters.get("drivers_max"):
-        conditions.append(f"NULLIF(total_drivers, '')::int <= ${idx}")
-        params.append(int(filters["drivers_max"]))
+    if filters.get("drivers_max") is not None:
+        conditions.append(f"total_drivers <= ${idx}")
+        params.append(filters["drivers_max"])
         idx += 1
 
     if filters.get("bipd_on_file"):
