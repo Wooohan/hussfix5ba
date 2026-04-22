@@ -2174,9 +2174,111 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
 # ── Inspections table functions ──────────────────────────────────────────────
 
 def _inspection_row_to_dict(row) -> dict:
-    """Convert a database row from the inspections table to a dictionary."""
+    """Convert a database row from the inspections table to a dictionary.
+
+    Maps raw DB column names to the field names the frontend expects:
+      reportNumber, date, location, oosViolations, driverViolations,
+      vehicleViolations, hazmatViolations, violationList, etc.
+    """
     d = dict(row)
-    return d
+
+    # Total violations = sum of all violation categories
+    basic_viol = int(d.get("basic_viol") or 0)
+    unsafe_viol = int(d.get("unsafe_viol") or 0)
+    fatigued_viol = int(d.get("fatigued_viol") or 0)
+    dr_fitness_viol = int(d.get("dr_fitness_viol") or 0)
+    subt_alcohol_viol = int(d.get("subt_alcohol_viol") or 0)
+    vh_maint_viol = int(d.get("vh_maint_viol") or 0)
+    hm_viol_raw = d.get("hm_viol")
+    hm_viol = int(hm_viol_raw) if hm_viol_raw is not None else 0
+
+    total_violations = basic_viol + unsafe_viol + fatigued_viol + dr_fitness_viol + subt_alcohol_viol + vh_maint_viol + hm_viol
+
+    # Build a violationList array that the frontend can iterate over.
+    # Each entry has label, description, and weight.
+    violation_list: list[dict] = []
+    _VIOL_CATEGORIES = [
+        ("unsafe_viol", unsafe_viol, "Unsafe Driving", "Unsafe driving violations"),
+        ("fatigued_viol", fatigued_viol, "HOS / Fatigued Driving", "Hours of service / fatigued driving violations"),
+        ("dr_fitness_viol", dr_fitness_viol, "Driver Fitness", "Driver fitness violations"),
+        ("subt_alcohol_viol", subt_alcohol_viol, "Controlled Substances / Alcohol", "Controlled substances / alcohol violations"),
+        ("vh_maint_viol", vh_maint_viol, "Vehicle Maintenance", "Vehicle maintenance violations"),
+        ("hm_viol", hm_viol, "Hazardous Materials", "Hazardous materials violations"),
+    ]
+    for _key, count, label, description in _VIOL_CATEGORIES:
+        if count > 0:
+            for _ in range(count):
+                violation_list.append({
+                    "label": label,
+                    "description": description,
+                    "weight": 1,
+                })
+
+    # Location: use report_state + county_code_state
+    report_state = d.get("report_state") or ""
+    county = d.get("county_code_state") or ""
+    location = f"{county}, {report_state}" if county and county != report_state else report_state
+
+    # OOS violations
+    oos_total = int(d.get("oos_total") or 0)
+    driver_oos = int(d.get("driver_oos_total") or 0)
+    vehicle_oos = int(d.get("vehicle_oos_total") or 0)
+    hazmat_oos = int(d.get("hazmat_oos_total") or 0)
+
+    result = {
+        # Fields the frontend expects
+        "reportNumber": d.get("report_number") or "",
+        "date": d.get("insp_date") or "",
+        "location": location,
+        "oosViolations": oos_total,
+        "driverViolations": driver_oos,
+        "vehicleViolations": vehicle_oos,
+        "hazmatViolations": hazmat_oos,
+        "violationList": violation_list,
+        "totalViolations": total_violations,
+
+        # Keep raw fields for the standalone inspections API
+        "unique_id": d.get("unique_id"),
+        "report_number": d.get("report_number"),
+        "report_state": report_state,
+        "dot_number": d.get("dot_number"),
+        "insp_date": d.get("insp_date"),
+        "insp_level_id": d.get("insp_level_id"),
+        "county_code_state": county,
+        "time_weight": d.get("time_weight"),
+        "driver_oos_total": driver_oos,
+        "vehicle_oos_total": vehicle_oos,
+        "total_hazmat_sent": d.get("total_hazmat_sent"),
+        "oos_total": oos_total,
+        "hazmat_oos_total": hazmat_oos,
+        "hazmat_placard_req": d.get("hazmat_placard_req"),
+        "unit_type_desc": d.get("unit_type_desc"),
+        "unit_make": d.get("unit_make"),
+        "unit_license": d.get("unit_license"),
+        "unit_license_state": d.get("unit_license_state"),
+        "vin": d.get("vin"),
+        "unit_decal_number": d.get("unit_decal_number"),
+        "unit_type_desc2": d.get("unit_type_desc2"),
+        "unit_make2": d.get("unit_make2"),
+        "unit_license2": d.get("unit_license2"),
+        "unit_license_state2": d.get("unit_license_state2"),
+        "vin2": d.get("vin2"),
+        "unit_decal_number2": d.get("unit_decal_number2"),
+        "unsafe_insp": d.get("unsafe_insp"),
+        "fatigued_insp": d.get("fatigued_insp"),
+        "dr_fitness_insp": d.get("dr_fitness_insp"),
+        "subt_alcohol_insp": d.get("subt_alcohol_insp"),
+        "vh_maint_insp": d.get("vh_maint_insp"),
+        "hm_insp": d.get("hm_insp"),
+        "basic_viol": basic_viol,
+        "unsafe_viol": unsafe_viol,
+        "fatigued_viol": fatigued_viol,
+        "dr_fitness_viol": dr_fitness_viol,
+        "subt_alcohol_viol": subt_alcohol_viol,
+        "vh_maint_viol": vh_maint_viol,
+        "hm_viol": hm_viol_raw,
+    }
+    return result
 
 async def fetch_inspections(filters: dict) -> dict:
     """Fetch inspections from the inspections table with optional filters.
