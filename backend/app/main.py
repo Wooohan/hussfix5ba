@@ -1,2517 +1,1015 @@
-import os
-import json
 import asyncio
-import time as _time
-import asyncpg
-from typing import Optional
+import ipaddress
+import re
+import time as _time_module
+from collections import defaultdict
+from urllib.parse import urlparse
+from fastapi import FastAPI, Request, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import PlainTextResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from contextlib import asynccontextmanager
+import httpx
+import os
+from dotenv import load_dotenv
+load_dotenv()
+from app.scraper import scrape_carrier, fetch_safety_data, fetch_insurance_data, close_clients
+from app.task_manager import task_manager
+from app.fmcsa_register import scrape_fmcsa_register
+from app.broker_snapshot import scrape_broker_snapshot
+from app.auth import create_token, verify_token, require_auth
+from app.database import (
+    connect_db, close_db,
+    upsert_carrier, fetch_carriers, delete_carrier as db_delete_carrier,
+    get_carrier_count, get_carrier_dashboard_stats,
+    update_carrier_insurance as db_update_carrier_insurance,
+    update_carrier_safety as db_update_carrier_safety, get_carriers_by_mc_range,
+    fetch_users, fetch_user_by_email, create_user, update_user, delete_user,
+    get_user_password_hash,
+    fetch_blocked_ips, block_ip, unblock_ip, is_ip_blocked,
+    save_fmcsa_register_entries, fetch_fmcsa_register_by_date,
+    get_fmcsa_extracted_dates, get_fmcsa_categories, delete_fmcsa_entries_before_date,
+    save_new_venture_entries, fetch_new_ventures, fetch_new_venture_by_id,
+    get_new_venture_count, get_new_venture_scraped_dates, delete_new_venture,
+    fetch_insurance_history,
+    fetch_inspections, get_inspections_count, get_inspections_dashboard_stats,
+    fetch_inspection_by_id, fetch_inspections_by_dot,
+)
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    await connect_db()
+    yield
+    await close_clients()
+    await close_db()
+app = FastAPI(lifespan=lifespan)
+_PUBLIC_PATHS: set[str] = {
+    "/health",
+    "/healthz",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/api/get-ip",
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/blocked-ips/check",
+}
+_PUBLIC_PREFIXES: tuple[str, ...] = (
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/api/blocked-ips/check/",
+)
+def _get_request_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.headers.get("x-real-ip", "") or (request.client.host if request.client else "")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-if not DATABASE_URL:
-    import warnings
-    warnings.warn("DATABASE_URL is not set. Database connections will fail.")
 
-_pool: Optional[asyncpg.Pool] = None
+# ---------------------------------------------------------------------------
+# Rate limiter (in-memory, per-IP)
+# ---------------------------------------------------------------------------
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX_REQUESTS = 15  # max attempts per window for auth endpoints
 
-# ── Dashboard stat cache ────────────────────────────────────────────────────
-_dashboard_cache: Optional[dict] = None
-_dashboard_cache_ts: float = 0.0
-_DASHBOARD_CACHE_TTL = 300  # 5 minutes
-
-_SCHEMA_SQL = """
--- ── Tables ──────────────────────────────────────────────────────────────────
--- NOTE: carriers table is now populated from the Company Census File (az4n-8mr2)
--- with ~4.4M records.  The table already exists in the database so we do NOT
--- try to CREATE it here.  The schema is managed externally.
-
-CREATE TABLE IF NOT EXISTS carriers (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    "MCS150_DATE" text,
-    "ADD_DATE" text,
-    "STATUS_CODE" text,
-    "DOT_NUMBER" text,
-    "DUN_BRADSTREET_NO" text,
-    "PHY_OMC_REGION" text,
-    "SAFETY_INV_TERR" text,
-    "CARRIER_OPERATION" text,
-    "BUSINESS_ORG_ID" text,
-    "MCS150_MILEAGE" text,
-    "MCS150_MILEAGE_YEAR" text,
-    "MCS151_MILEAGE" text,
-    "TOTAL_CARS" text,
-    "MCS150_UPDATE_CODE_ID" text,
-    "PRIOR_REVOKE_FLAG" text,
-    "PRIOR_REVOKE_DOT_NUMBER" text,
-    "PHONE" text,
-    "FAX" text,
-    "CELL_PHONE" text,
-    "COMPANY_OFFICER_1" text,
-    "COMPANY_OFFICER_2" text,
-    "BUSINESS_ORG_DESC" text,
-    "TRUCK_UNITS" text,
-    "POWER_UNITS" integer,
-    "BUS_UNITS" text,
-    "FLEETSIZE" text,
-    "REVIEW_ID" text,
-    "RECORDABLE_CRASH_RATE" text,
-    "MAIL_NATIONALITY_INDICATOR" text,
-    "PHY_NATIONALITY_INDICATOR" text,
-    "PHY_BARRIO" text,
-    "MAIL_BARRIO" text,
-    "CARSHIP" text,
-    "DOCKET1PREFIX" text,
-    "DOCKET1" text,
-    "DOCKET2PREFIX" text,
-    "DOCKET2" text,
-    "DOCKET3PREFIX" text,
-    "DOCKET3" text,
-    "POINTNUM" text,
-    "TOTAL_INTRASTATE_DRIVERS" text,
-    "MCSIPSTEP" text,
-    "MCSIPDATE" text,
-    "HM_Ind" text,
-    "INTERSTATE_BEYOND_100_MILES" text,
-    "INTERSTATE_WITHIN_100_MILES" text,
-    "INTRASTATE_BEYOND_100_MILES" text,
-    "INTRASTATE_WITHIN_100_MILES" text,
-    "TOTAL_CDL" text,
-    "TOTAL_DRIVERS" integer,
-    "AVG_DRIVERS_LEASED_PER_MONTH" text,
-    "CLASSDEF" text,
-    "LEGAL_NAME" text,
-    "DBA_NAME" text,
-    "PHY_STREET" text,
-    "PHY_CITY" text,
-    "PHY_COUNTRY" text,
-    "PHY_STATE" text,
-    "PHY_ZIP" text,
-    "PHY_CNTY" text,
-    "CARRIER_MAILING_STREET" text,
-    "CARRIER_MAILING_STATE" text,
-    "CARRIER_MAILING_CITY" text,
-    "CARRIER_MAILING_COUNTRY" text,
-    "CARRIER_MAILING_ZIP" text,
-    "CARRIER_MAILING_CNTY" text,
-    "CARRIER_MAILING_UND_DATE" text,
-    "DRIVER_INTER_TOTAL" text,
-    "EMAIL_ADDRESS" text,
-    "REVIEW_TYPE" text,
-    "REVIEW_DATE" text,
-    "SAFETY_RATING" text,
-    "SAFETY_RATING_DATE" text,
-    "UNDELIV_PHY" text,
-    "CRGO_GENFREIGHT" text,
-    "CRGO_HOUSEHOLD" text,
-    "CRGO_METALSHEET" text,
-    "CRGO_MOTOVEH" text,
-    "CRGO_DRIVETOW" text,
-    "CRGO_LOGPOLE" text,
-    "CRGO_BLDGMAT" text,
-    "CRGO_MOBILEHOME" text,
-    "CRGO_MACHLRG" text,
-    "CRGO_PRODUCE" text,
-    "CRGO_LIQGAS" text,
-    "CRGO_INTERMODAL" text,
-    "CRGO_PASSENGERS" text,
-    "CRGO_OILFIELD" text,
-    "CRGO_LIVESTOCK" text,
-    "CRGO_GRAINFEED" text,
-    "CRGO_COALCOKE" text,
-    "CRGO_MEAT" text,
-    "CRGO_GARBAGE" text,
-    "CRGO_USMAIL" text,
-    "CRGO_CHEM" text,
-    "CRGO_DRYBULK" text,
-    "CRGO_COLDFOOD" text,
-    "CRGO_BEVERAGES" text,
-    "CRGO_PAPERPROD" text,
-    "CRGO_UTILITY" text,
-    "CRGO_FARMSUPP" text,
-    "CRGO_CONSTRUCT" text,
-    "CRGO_WATERWELL" text,
-    "CRGO_CARGOOTHR" text,
-    "CRGO_CARGOOTHR_DESC" text,
-    "OWNTRUCK" text,
-    "OWNTRACT" text,
-    "OWNTRAIL" text,
-    "OWNCOACH" text,
-    "OWNSCHOOL_1_8" text,
-    "OWNSCHOOL_9_15" text,
-    "OWNSCHOOL_16" text,
-    "OWNBUS_16" text,
-    "OWNVAN_1_8" text,
-    "OWNVAN_9_15" text,
-    "OWNLIMO_1_8" text,
-    "OWNLIMO_9_15" text,
-    "OWNLIMO_16" text,
-    "TRMTRUCK" text,
-    "TRMTRACT" text,
-    "TRMTRAIL" text,
-    "TRMCOACH" text,
-    "TRMSCHOOL_1_8" text,
-    "TRMSCHOOL_9_15" text,
-    "TRMSCHOOL_16" text,
-    "TRMBUS_16" text,
-    "TRMVAN_1_8" text,
-    "TRMVAN_9_15" text,
-    "TRMLIMO_1_8" text,
-    "TRMLIMO_9_15" text,
-    "TRMLIMO_16" text,
-    "TRPTRUCK" text,
-    "TRPTRACT" text,
-    "TRPTRAIL" text,
-    "TRPCOACH" text,
-    "TRPSCHOOL_1_8" text,
-    "TRPSCHOOL_9_15" text,
-    "TRPSCHOOL_16" text,
-    "TRPBUS_16" text,
-    "TRPVAN_1_8" text,
-    "TRPVAN_9_15" text,
-    "TRPLIMO_1_8" text,
-    "TRPLIMO_9_15" text,
-    "TRPLIMO_16" text,
-    "DOCKET1_STATUS_CODE" text,
-    "DOCKET2_STATUS_CODE" text,
-    "DOCKET3_STATUS_CODE" text
-);
-CREATE TABLE IF NOT EXISTS fmcsa_register (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    number TEXT NOT NULL,
-    title TEXT NOT NULL,
-    decided TEXT,
-    category TEXT,
-    date_fetched TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(number, date_fetched)
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT,
-    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
-    plan TEXT NOT NULL DEFAULT 'Free' CHECK (plan IN ('Free', 'Starter', 'Pro', 'Enterprise')),
-    daily_limit INTEGER NOT NULL DEFAULT 50,
-    records_extracted_today INTEGER NOT NULL DEFAULT 0,
-    last_active TEXT DEFAULT 'Never',
-    ip_address TEXT,
-    is_online BOOLEAN DEFAULT false,
-    is_blocked BOOLEAN DEFAULT false,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS blocked_ips (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    ip_address TEXT NOT NULL UNIQUE,
-    reason TEXT,
-    blocked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    blocked_by TEXT
-);
-
--- ── Timestamp triggers ──────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION update_carriers_updated_at()
-RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS update_carriers_updated_at ON carriers;
-CREATE TRIGGER update_carriers_updated_at BEFORE UPDATE ON carriers
-    FOR EACH ROW EXECUTE FUNCTION update_carriers_updated_at();
-
-CREATE OR REPLACE FUNCTION update_fmcsa_register_updated_at()
-RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS update_fmcsa_register_updated_at ON fmcsa_register;
-CREATE TRIGGER update_fmcsa_register_updated_at BEFORE UPDATE ON fmcsa_register
-    FOR EACH ROW EXECUTE FUNCTION update_fmcsa_register_updated_at();
-
-CREATE OR REPLACE FUNCTION update_users_updated_at()
-RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS update_users_updated_at ON users;
-CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
-    FOR EACH ROW EXECUTE FUNCTION update_users_updated_at();
-
--- ── New Ventures table (ALL BrokerSnapshot CSV columns) ──────────────────────
-CREATE TABLE IF NOT EXISTS new_ventures (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    dot_number TEXT,
-    prefix TEXT,
-    docket_number TEXT,
-    status_code TEXT,
-    carship TEXT,
-    carrier_operation TEXT,
-    name TEXT,
-    name_dba TEXT,
-    add_date TEXT,
-    chgn_date TEXT,
-    common_stat TEXT,
-    contract_stat TEXT,
-    broker_stat TEXT,
-    common_app_pend TEXT,
-    contract_app_pend TEXT,
-    broker_app_pend TEXT,
-    common_rev_pend TEXT,
-    contract_rev_pend TEXT,
-    broker_rev_pend TEXT,
-    property_chk TEXT,
-    passenger_chk TEXT,
-    hhg_chk TEXT,
-    private_auth_chk TEXT,
-    enterprise_chk TEXT,
-    operating_status TEXT,
-    operating_status_indicator TEXT,
-    phy_str TEXT,
-    phy_city TEXT,
-    phy_st TEXT,
-    phy_zip TEXT,
-    phy_country TEXT,
-    phy_cnty TEXT,
-    mai_str TEXT,
-    mai_city TEXT,
-    mai_st TEXT,
-    mai_zip TEXT,
-    mai_country TEXT,
-    mai_cnty TEXT,
-    phy_undeliv TEXT,
-    mai_undeliv TEXT,
-    phy_phone TEXT,
-    phy_fax TEXT,
-    mai_phone TEXT,
-    mai_fax TEXT,
-    cell_phone TEXT,
-    email_address TEXT,
-    company_officer_1 TEXT,
-    company_officer_2 TEXT,
-    genfreight TEXT,
-    household TEXT,
-    metalsheet TEXT,
-    motorveh TEXT,
-    drivetow TEXT,
-    logpole TEXT,
-    bldgmat TEXT,
-    mobilehome TEXT,
-    machlrg TEXT,
-    produce TEXT,
-    liqgas TEXT,
-    intermodal TEXT,
-    passengers TEXT,
-    oilfield TEXT,
-    livestock TEXT,
-    grainfeed TEXT,
-    coalcoke TEXT,
-    meat TEXT,
-    garbage TEXT,
-    usmail TEXT,
-    chem TEXT,
-    drybulk TEXT,
-    coldfood TEXT,
-    beverages TEXT,
-    paperprod TEXT,
-    utility TEXT,
-    farmsupp TEXT,
-    construct TEXT,
-    waterwell TEXT,
-    cargoothr TEXT,
-    cargoothr_desc TEXT,
-    hm_ind TEXT,
-    bipd_req TEXT,
-    cargo_req TEXT,
-    bond_req TEXT,
-    bipd_file TEXT,
-    cargo_file TEXT,
-    bond_file TEXT,
-    owntruck TEXT,
-    owntract TEXT,
-    owntrail TEXT,
-    owncoach TEXT,
-    ownschool_1_8 TEXT,
-    ownschool_9_15 TEXT,
-    ownschool_16 TEXT,
-    ownbus_16 TEXT,
-    ownvan_1_8 TEXT,
-    ownvan_9_15 TEXT,
-    ownlimo_1_8 TEXT,
-    ownlimo_9_15 TEXT,
-    ownlimo_16 TEXT,
-    trmtruck TEXT,
-    trmtract TEXT,
-    trmtrail TEXT,
-    trmcoach TEXT,
-    trmschool_1_8 TEXT,
-    trmschool_9_15 TEXT,
-    trmschool_16 TEXT,
-    trmbus_16 TEXT,
-    trmvan_1_8 TEXT,
-    trmvan_9_15 TEXT,
-    trmlimo_1_8 TEXT,
-    trmlimo_9_15 TEXT,
-    trmlimo_16 TEXT,
-    trptruck TEXT,
-    trptract TEXT,
-    trptrail TEXT,
-    trpcoach TEXT,
-    trpschool_1_8 TEXT,
-    trpschool_9_15 TEXT,
-    trpschool_16 TEXT,
-    trpbus_16 TEXT,
-    trpvan_1_8 TEXT,
-    trpvan_9_15 TEXT,
-    trplimo_1_8 TEXT,
-    trplimo_9_15 TEXT,
-    trplimo_16 TEXT,
-    total_trucks TEXT,
-    total_buses TEXT,
-    total_pwr INTEGER,
-    fleetsize TEXT,
-    inter_within_100 TEXT,
-    inter_beyond_100 TEXT,
-    total_inter_drivers TEXT,
-    intra_within_100 TEXT,
-    intra_beyond_100 TEXT,
-    total_intra_drivers TEXT,
-    total_drivers TEXT,
-    avg_tld TEXT,
-    total_cdl TEXT,
-    review_type TEXT,
-    review_id TEXT,
-    review_date TEXT,
-    recordable_crash_rate TEXT,
-    mcs150_mileage TEXT,
-    mcs151_mileage TEXT,
-    mcs150_mileage_year TEXT,
-    mcs150_date TEXT,
-    safety_rating TEXT,
-    safety_rating_date TEXT,
-    arber TEXT,
-    smartway TEXT,
-    tia TEXT,
-    tia_phone TEXT,
-    tia_contact_name TEXT,
-    tia_tool_free TEXT,
-    tia_fax TEXT,
-    tia_email TEXT,
-    tia_website TEXT,
-    phy_ups_store TEXT,
-    mai_ups_store TEXT,
-    phy_mail_box TEXT,
-    mai_mail_box TEXT,
-    raw_data JSONB,
-    scrape_date TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(dot_number, add_date)
-);
-
-CREATE OR REPLACE FUNCTION update_new_ventures_updated_at()
-RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS update_new_ventures_updated_at ON new_ventures;
-CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
-    FOR EACH ROW EXECUTE FUNCTION update_new_ventures_updated_at();
-
--- ── Default admin user ──────────────────────────────────────────────────────
-INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extracted_today, ip_address, is_online, is_blocked)
-VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
-ON CONFLICT (email) DO NOTHING;
-"""
-
-async def connect_db() -> None:
-    global _pool
-    _pool = await asyncpg.create_pool(
-        DATABASE_URL, min_size=2, max_size=20,
-        command_timeout=60,
-    )
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(_SCHEMA_SQL)
-        print("[DB] Connected to PostgreSQL, schema initialized, pool created")
-    except Exception as e:
-        print(f"[DB] Connected to PostgreSQL, pool created (schema init skipped: {e})")
-
-async def close_db() -> None:
-    global _pool
-    if _pool:
-        await _pool.close()
-    _pool = None
-    print("[DB] PostgreSQL connection pool closed")
-
-def get_pool() -> asyncpg.Pool:
-    if _pool is None:
-        raise RuntimeError("Database not connected. Call connect_db() first.")
-    return _pool
-
-async def upsert_carrier(record: dict) -> bool:
-    """Upsert a carrier using Census File column names.
-
-    The carriers table is now the Company Census File schema.
-    We upsert on dot_number (bigint) which is the natural key.
-    """
-    pool = get_pool()
-    dot = record.get("dot_number")
-    if not dot:
-        return False
-    try:
-        await pool.execute(
-            """
-            INSERT INTO carriers (
-                dot_number, legal_name, dba_name, phone, email_address,
-                power_units, total_drivers, phy_street, phy_city, phy_state, phy_zip, phy_country,
-                carrier_mailing_street, carrier_mailing_city, carrier_mailing_state, carrier_mailing_zip,
-                mcs150_date, mcs150_mileage, mcs150_mileage_year,
-                classdef, carrier_operation, hm_ind,
-                dun_bradstreet_no, safety_rating, safety_rating_date,
-                status_code, carship, docket1prefix, docket1
-            ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11, $12,
-                $13, $14, $15, $16,
-                $17, $18, $19,
-                $20, $21, $22,
-                $23, $24, $25,
-                $26, $27, $28, $29
-            )
-            ON CONFLICT (dot_number) DO UPDATE SET
-                legal_name = EXCLUDED.legal_name,
-                dba_name = EXCLUDED.dba_name,
-                phone = EXCLUDED.phone,
-                email_address = EXCLUDED.email_address,
-                power_units = EXCLUDED.power_units,
-                total_drivers = EXCLUDED.total_drivers,
-                phy_street = EXCLUDED.phy_street,
-                phy_city = EXCLUDED.phy_city,
-                phy_state = EXCLUDED.phy_state,
-                phy_zip = EXCLUDED.phy_zip,
-                mcs150_date = EXCLUDED.mcs150_date,
-                mcs150_mileage = EXCLUDED.mcs150_mileage,
-                classdef = EXCLUDED.classdef,
-                carrier_operation = EXCLUDED.carrier_operation,
-                hm_ind = EXCLUDED.hm_ind,
-                dun_bradstreet_no = EXCLUDED.dun_bradstreet_no,
-                safety_rating = EXCLUDED.safety_rating,
-                safety_rating_date = EXCLUDED.safety_rating_date,
-                status_code = EXCLUDED.status_code,
-                carship = EXCLUDED.carship,
-                docket1prefix = EXCLUDED.docket1prefix,
-                docket1 = EXCLUDED.docket1
-            """,
-            int(dot),
-            record.get("legal_name"),
-            record.get("dba_name"),
-            record.get("phone"),
-            record.get("email_address", record.get("email")),
-            record.get("power_units"),
-            record.get("total_drivers", record.get("drivers")),
-            record.get("phy_street"),
-            record.get("phy_city"),
-            record.get("phy_state"),
-            record.get("phy_zip"),
-            record.get("phy_country"),
-            record.get("carrier_mailing_street"),
-            record.get("carrier_mailing_city"),
-            record.get("carrier_mailing_state"),
-            record.get("carrier_mailing_zip"),
-            record.get("mcs150_date"),
-            record.get("mcs150_mileage"),
-            record.get("mcs150_mileage_year"),
-            record.get("classdef"),
-            record.get("carrier_operation"),
-            record.get("hm_ind"),
-            record.get("dun_bradstreet_no", record.get("duns_number")),
-            record.get("safety_rating"),
-            record.get("safety_rating_date"),
-            record.get("status_code"),
-            record.get("carship"),
-            record.get("docket1prefix"),
-            record.get("docket1"),
-        )
+def _is_rate_limited(key: str, max_requests: int = _RATE_LIMIT_MAX_REQUESTS) -> bool:
+    now = _time_module.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    hits = _rate_limit_store[key]
+    # prune old entries
+    _rate_limit_store[key] = [t for t in hits if t > window_start]
+    if len(_rate_limit_store[key]) >= max_requests:
         return True
-    except Exception as e:
-        print(f"[DB] Error upserting carrier DOT {dot}: {e}")
-        return False
+    _rate_limit_store[key].append(now)
+    return False
 
-async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
-    """Insurance data is now in the separate insurance_history table.
 
-    This is a no-op for the Census schema but kept for API compatibility.
-    """
-    _ = policies  # insurance is managed via insurance_history table
-    print(f"[DB] update_carrier_insurance called for DOT {dot_number} – "
-          "insurance is managed via insurance_history table, skipping.")
-    return True
-
-async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) -> dict:
-    pool = get_pool()
-    if not entries:
-        return {"success": True, "saved": 0, "skipped": 0}
-
-    saved = 0
-    skipped = 0
-    batch_size = 500
-    try:
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for i in range(0, len(entries), batch_size):
-                    batch = entries[i:i + batch_size]
-                    args = [
-                        (
-                            entry["number"],
-                            entry.get("title", ""),
-                            entry.get("decided", "N/A"),
-                            entry.get("category", ""),
-                            extracted_date,
-                        )
-                        for entry in batch
-                    ]
-                    await conn.executemany(
-                        """
-                        INSERT INTO fmcsa_register (number, title, decided, category, date_fetched)
-                        VALUES ($1, $2, $3, $4, $5)
-                        ON CONFLICT (number, date_fetched) DO UPDATE SET
-                            title = EXCLUDED.title,
-                            decided = EXCLUDED.decided,
-                            category = EXCLUDED.category,
-                            updated_at = NOW()
-                        """,
-                        args,
-                    )
-                    saved += len(batch)
-    except Exception as e:
-        print(f"[DB] Error batch-saving FMCSA entries: {e}")
-        skipped = len(entries) - saved
-
-    return {"success": True, "saved": saved, "skipped": skipped}
-
-async def fetch_fmcsa_register_by_date(
-    extracted_date: str,
-    category: Optional[str] = None,
-    search_term: Optional[str] = None,
-) -> list[dict]:
-    pool = get_pool()
-
-    conditions = ["date_fetched = $1"]
-    params: list = [extracted_date]
-    idx = 2
-
-    if category:
-        conditions.append(f"category = ${idx}")
-        params.append(category)
-        idx += 1
-
-    if search_term:
-        conditions.append(f"(title ILIKE ${idx} OR number ILIKE ${idx})")
-        params.append(f"%{search_term}%")
-        idx += 1
-
-    where = " AND ".join(conditions)
-    query = f"""
-        SELECT number, title, decided, category, date_fetched
-        FROM fmcsa_register
-        WHERE {where}
-        ORDER BY number
-        LIMIT 10000
-    """
-
-    rows = await pool.fetch(query, *params)
-    return [dict(row) for row in rows]
-
-async def get_fmcsa_extracted_dates() -> list[str]:
-    pool = get_pool()
-    rows = await pool.fetch(
-        "SELECT DISTINCT date_fetched FROM fmcsa_register ORDER BY date_fetched DESC"
-    )
-    return [row["date_fetched"] for row in rows]
-
-def _parse_jsonb(value) -> Optional[object]:
-    if value is None:
+def _require_admin(request: Request) -> dict | None:
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
         return None
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return value
-    return value
+    return user
 
-def _format_insurance_history(raw_filings) -> list[dict]:
-    if not raw_filings:
-        return []
-    results = []
-    for row in raw_filings:
-        raw_amount = (row.get("max_cov_amount") or "").strip()
-        try:
-            amount_int = int(raw_amount) * 1000
-            coverage = f"${amount_int:,}"
-        except (ValueError, TypeError):
-            coverage = raw_amount or "N/A"
-        cancl = (row.get("cancl_effective_date") or "").strip()
-        results.append({
-            "type": (row.get("ins_type_desc") or "").strip(),
-            "coverageAmount": coverage,
-            "policyNumber": (row.get("policy_no") or "").strip(),
-            "effectiveDate": (row.get("effective_date") or "").strip(),
-            "carrier": (row.get("name_company") or "").strip(),
-            "formCode": (row.get("ins_form_code") or "").strip(),
-            "transDate": (row.get("trans_date") or "").strip(),
-            "underlLimAmount": (row.get("underl_lim_amount") or "").strip(),
-            "canclEffectiveDate": cancl,
-            "status": "Cancelled" if cancl else "Active",
-        })
-    return results
 
-_CARGO_COL_MAP = {
-    "crgo_genfreight": "General Freight",
-    "crgo_household": "Household Goods",
-    "crgo_metalsheet": "Metal/Sheets/Coils",
-    "crgo_motoveh": "Motor Vehicles",
-    "crgo_drivetow": "Drive-Away/Tow-Away",
-    "crgo_logpole": "Logs/Poles/Lumber",
-    "crgo_bldgmat": "Building Materials",
-    "crgo_mobilehome": "Mobile Homes",
-    "crgo_machlrg": "Machinery/Large Objects",
-    "crgo_produce": "Fresh Produce",
-    "crgo_liqgas": "Liquids/Gases",
-    "crgo_intermodal": "Intermodal Containers",
-    "crgo_passengers": "Passengers",
-    "crgo_oilfield": "Oilfield Equipment",
-    "crgo_livestock": "Livestock",
-    "crgo_grainfeed": "Grain/Feed/Hay",
-    "crgo_coalcoke": "Coal/Coke",
-    "crgo_meat": "Meat",
-    "crgo_garbage": "Garbage/Refuse",
-    "crgo_usmail": "US Mail",
-    "crgo_chem": "Chemicals",
-    "crgo_drybulk": "Dry Bulk",
-    "crgo_coldfood": "Refrigerated Food",
-    "crgo_beverages": "Beverages",
-    "crgo_paperprod": "Paper Products",
-    "crgo_utility": "Utilities",
-    "crgo_farmsupp": "Farm Supplies",
-    "crgo_construct": "Construction",
-    "crgo_waterwell": "Water Well",
-    "crgo_cargoothr": "Other",
-}
-
-_CARRIER_OP_MAP = {
-    "A": "Interstate",
-    "B": "Intrastate Only (HM)",
-    "C": "Intrastate Only (Non-HM)",
-}
-
-_STATUS_CODE_MAP = {
-    "A": "Active",
-    "I": "Inactive",
-    "P": "Pending",
-}
-
-_CARSHIP_MAP = {
-    "C": "CARRIER",
-    "B": "BROKER",
-    "R": "REGISTRANT",
-    "F": "FREIGHT FORWARDER",
-    "I": "IEP (Intermodal Equipment Provider)",
-    "S": "SHIPPER",
-    "T": "CARGO TANK FACILITY",
-}
-
-def _build_mc_number(d: dict) -> str:
-    """Build a display MC/MX/FF number from all docket fields.
-
-    Returns a comma-separated list of all docket numbers, e.g.
-    'MC-1418760, FF-26167'.
-    """
-    parts = []
-    for pfx_key, num_key in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
-        prefix = d.get(pfx_key) or ""
-        number = d.get(num_key) or ""
-        if prefix and number:
-            parts.append(f"{prefix}-{number}")
-        elif number:
-            parts.append(number)
-    return ", ".join(parts)
-
-def _build_address(street: str, city: str, state: str, zipcode: str, country: str = "") -> str:
-    parts = [p for p in [street, city, state, zipcode] if p]
-    addr = ", ".join(parts)
-    if country and country != "US":
-        addr = f"{addr}, {country}" if addr else country
-    return addr
-
-def _parse_carship(raw: str) -> str:
-    """Convert semicolon-separated carship codes to labels."""
-    if not raw:
-        return ""
-    codes = [c.strip() for c in raw.split(";")]
-    labels = [_CARSHIP_MAP.get(c, c) for c in codes]
-    return " / ".join(labels)
-
-def _build_cargo_list(d: dict) -> list[str]:
-    """Build a list of human-readable cargo types from crgo_* columns."""
-    result = []
-    for col, label in _CARGO_COL_MAP.items():
-        val = d.get(col)
-        if val and val.strip().upper() == "X":
-            result.append(label)
-    other_desc = d.get("crgo_cargoothr_desc")
-    if other_desc and other_desc.strip():
-        # Replace generic "Other" with the description if present
-        if "Other" in result:
-            result.remove("Other")
-        result.append(other_desc.strip())
-    return result
-
-def _format_mcs150_date(raw: str) -> str:
-    """Convert Census mcs150_date (e.g. '20130729 2240') to MM/DD/YYYY."""
-    if not raw:
-        return ""
-    date_part = raw.strip().split()[0] if raw else ""
-    if len(date_part) == 8 and date_part.isdigit():
-        return f"{date_part[4:6]}/{date_part[6:8]}/{date_part[:4]}"
-    return raw
-
-def _carrier_row_to_dict(row) -> dict:
-    """Map a Census-schema carriers row to the API response format.
-
-    The API response keeps the same field names the frontend expects
-    (mc_number, dot_number, email, phone, physical_address, etc.) so the
-    frontend needs minimal changes.
-    """
-    d = dict(row)
-
-    mc_number = _build_mc_number(d)
-    dot_number = str(d.get("dot_number") or "")
-
-    physical_address = _build_address(
-        d.get("phy_street") or "",
-        d.get("phy_city") or "",
-        d.get("phy_state") or "",
-        d.get("phy_zip") or "",
-        d.get("phy_country") or "",
-    )
-    mailing_address = _build_address(
-        d.get("carrier_mailing_street") or "",
-        d.get("carrier_mailing_city") or "",
-        d.get("carrier_mailing_state") or "",
-        d.get("carrier_mailing_zip") or "",
-        d.get("carrier_mailing_country") or "",
-    )
-
-    cargo_carried = _build_cargo_list(d)
-    op_code = d.get("carrier_operation") or ""
-    carrier_operation_list = [_CARRIER_OP_MAP.get(op_code, op_code)] if op_code else []
-
-    classdef = d.get("classdef") or ""
-    operation_classification = [c.strip() for c in classdef.split(";")] if classdef else []
-
-    status_code = d.get("status_code") or ""
-    status_label = _STATUS_CODE_MAP.get(status_code, status_code)
-
-    # Operating Authority status (from docket1_status_code)
-    docket_status_code = d.get("docket1_status_code") or ""
-    _DOCKET_STATUS_MAP = {"A": "AUTHORIZED", "I": "NOT AUTHORIZED", "P": "PENDING"}
-    docket_status = _DOCKET_STATUS_MAP.get(docket_status_code, "NOT AUTHORIZED")
-
-    mcs150_date = _format_mcs150_date(d.get("mcs150_date") or "")
-    mileage = d.get("mcs150_mileage") or ""
-    mileage_year = d.get("mcs150_mileage_year") or ""
-    mcs150_mileage = f"{mileage} ({mileage_year})" if mileage and mileage_year else mileage
-
-    # Build operating-territory flags
-    territory = []
-    if d.get("interstate_beyond_100_miles"):
-        territory.append("Interstate (>100 mi)")
-    if d.get("interstate_within_100_miles"):
-        territory.append("Interstate (<100 mi)")
-    if d.get("intrastate_beyond_100_miles"):
-        territory.append("Intrastate (>100 mi)")
-    if d.get("intrastate_within_100_miles"):
-        territory.append("Intrastate (<100 mi)")
-
-    entity_type = _parse_carship(d.get("carship") or "")
-
-    result = {
-        "id": str(d.get("id", "")),
-        "mc_number": mc_number,
-        "dot_number": dot_number,
-        "legal_name": d.get("legal_name") or "",
-        "dba_name": d.get("dba_name") or "",
-        "entity_type": entity_type,
-        "status": status_label,
-        "status_code": status_code,
-        "authority_status": docket_status,
-        "email": d.get("email_address") or "",
-        "phone": d.get("phone") or "",
-        "fax": d.get("fax") or "",
-        "power_units": d.get("power_units") or "",
-        "drivers": d.get("total_drivers") or "",
-        "physical_address": physical_address,
-        "mailing_address": mailing_address,
-        "phy_state": d.get("phy_state") or "",
-        "mcs150_date": mcs150_date,
-        "mcs150_mileage": mcs150_mileage,
-        "operation_classification": operation_classification,
-        "carrier_operation": carrier_operation_list,
-        "cargo_carried": cargo_carried,
-        "hm_ind": d.get("hm_ind") or "",
-        "duns_number": d.get("dun_bradstreet_no") or "",
-        "safety_rating": d.get("safety_rating") or "",
-        "safety_rating_date": d.get("safety_rating_date") or "",
-        "operating_territory": territory,
-        "company_officer_1": d.get("company_officer_1") or "",
-        "company_officer_2": d.get("company_officer_2") or "",
-        "fleetsize": d.get("fleetsize") or "",
-        "add_date": d.get("add_date") or "",
-        "truck_units": d.get("truck_units") or "",
-        "bus_units": d.get("bus_units") or "",
-        # JSONB fields that no longer exist in Census data
-        "basic_scores": None,
-        "oos_rates": None,
-        "insurance_policies": None,
-        "inspections": None,
-        "crashes": None,
-    }
-
-    # Insurance history filings – populated separately via batch fetch
-    # in fetch_carriers() after this function returns.
-    result["insurance_history_filings"] = []
-
-    return result
-
-async def fetch_carriers(filters: dict) -> dict:
-    """Fetch carriers from the Census-schema carriers table.
-
-    Performance optimisations vs. the previous version
-    ---------------------------------------------------
-    1. All insurance-related filters are collected and merged into a
-       **single EXISTS / NOT EXISTS** sub-query (or at most two – one
-       positive, one negative).  Previously every insurance filter
-       generated its own correlated sub-query which multiplied the
-       work the planner had to do.
-    2. The gigantic CASE expression for next-renewal-date is replaced
-       by a simpler ``_next_renewal_sql`` helper that computes the
-       same value with far fewer nested calls to ``TO_DATE`` /
-       ``MAKE_DATE``.
-    3. ``years_in_business`` filters now compare the raw ``add_date``
-       string directly (``add_date <= to_char(…, 'YYYYMMDD')``)
-       so PG can use a plain B-tree index on ``add_date`` instead of
-       casting every row through ``TO_DATE``.
-    4. ``carrier_operation`` and ``state`` use ``= ANY($N)`` instead
-       of N separate OR-clauses, letting PG use the B-tree index in a
-       single pass.
-    """
-    pool = get_pool()
-
-    conditions: list[str] = []
-    params: list = []
-    idx = 1
-
-    # ------------------------------------------------------------------
-    # Carrier-table filters (no insurance_history involvement)
-    # ------------------------------------------------------------------
-
-    if filters.get("mc_number"):
-        mc_raw = filters["mc_number"].strip().upper()
-        mc_prefix = ""
-        mc_num = mc_raw
-        for pfx in ("MC", "MX", "FF"):
-            if mc_raw.startswith(pfx):
-                mc_prefix = pfx
-                mc_num = mc_raw[len(pfx):].lstrip("-").strip()
-                break
-        docket_clauses = []
-        if mc_prefix:
-            for dk_pfx, dk_num in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
-                docket_clauses.append(f"(c.{dk_pfx} = ${idx} AND c.{dk_num} = ${idx + 1})")
-                params.extend([mc_prefix, mc_num])
-                idx += 2
-        else:
-            for dk_num in ["docket1", "docket2", "docket3"]:
-                docket_clauses.append(f"c.{dk_num} = ${idx}")
-                params.append(mc_num)
-                idx += 1
-        conditions.append(f"({' OR '.join(docket_clauses)})")
-
-    if filters.get("dot_number"):
-        dot_val = filters["dot_number"].strip()
-        conditions.append(f"c.dot_number = ${idx}::bigint")
-        params.append(int(dot_val))
-        idx += 1
-
-    if filters.get("legal_name"):
-        conditions.append(f"c.legal_name ILIKE ${idx}")
-        params.append(f"%{filters['legal_name']}%")
-        idx += 1
-
-    entity_type = filters.get("entity_type")
-    if entity_type:
-        et_upper = entity_type.upper()
-        reverse_map = {v: k for k, v in _CARSHIP_MAP.items()}
-        code = reverse_map.get(et_upper, et_upper)
-        # Use exact match (=) instead of ILIKE with wildcards to leverage
-        # B-Tree index on carship – exponentially faster on 4.4M rows.
-        conditions.append(f"c.carship = ${idx}")
-        params.append(code)
-        idx += 1
-
-    active = filters.get("active")
-    if active == "true":
-        conditions.append("c.docket1_status_code = 'A'")
-    elif active == "false":
-        conditions.append("(c.docket1_status_code IS NULL OR c.docket1_status_code != 'A')")
-
-    # Years-in-business: compare the raw YYYYMMDD string directly so
-    # PG can use a B-tree index on add_date without per-row TO_DATE.
-    if filters.get("years_in_business_min"):
-        conditions.append(
-            f"c.add_date IS NOT NULL AND c.add_date != '' "
-            f"AND c.add_date <= to_char(CURRENT_DATE - make_interval(years => ${idx}), 'YYYYMMDD')"
-        )
-        params.append(int(filters["years_in_business_min"]))
-        idx += 1
-    if filters.get("years_in_business_max"):
-        conditions.append(
-            f"c.add_date IS NOT NULL AND c.add_date != '' "
-            f"AND c.add_date >= to_char(CURRENT_DATE - make_interval(years => ${idx}), 'YYYYMMDD')"
-        )
-        params.append(int(filters["years_in_business_max"]))
-        idx += 1
-
-    # State: use ANY() for index-friendly single-pass lookup
-    if filters.get("state"):
-        states = [s.strip().upper() for s in filters["state"].split("|")]
-        conditions.append(f"c.phy_state = ANY(${idx})")
-        params.append(states)
-        idx += 1
-
-    has_email = filters.get("has_email")
-    if has_email == "true":
-        conditions.append("c.email_address IS NOT NULL AND c.email_address != ''")
-    elif has_email == "false":
-        conditions.append("(c.email_address IS NULL OR c.email_address = '')")
-
-    has_company_rep = filters.get("has_company_rep")
-    if has_company_rep == "true":
-        conditions.append("c.dba_name IS NOT NULL AND c.dba_name != ''")
-    elif has_company_rep == "false":
-        conditions.append("(c.dba_name IS NULL OR c.dba_name = '')")
-
-    if filters.get("classification"):
-        classifications = filters["classification"]
-        if isinstance(classifications, str):
-            classifications = classifications.split(",")
-        or_clauses = []
-        for cls in classifications:
-            or_clauses.append(f"c.classdef ILIKE ${idx}")
-            params.append(f"%{cls.strip()}%")
-            idx += 1
-        conditions.append(f"({' OR '.join(or_clauses)})")
-
-    # Carrier operation: use ANY() for single-pass index scan
-    if filters.get("carrier_operation"):
-        ops = filters["carrier_operation"]
-        if isinstance(ops, str):
-            ops = ops.split(",")
-        reverse_op = {v: k for k, v in _CARRIER_OP_MAP.items()}
-        codes = [reverse_op.get(o.strip(), o.strip()) for o in ops]
-        conditions.append(f"c.carrier_operation = ANY(${idx})")
-        params.append(codes)
-        idx += 1
-
-    if filters.get("cargo"):
-        cargo = filters["cargo"]
-        if isinstance(cargo, str):
-            cargo = cargo.split(",")
-        reverse_cargo = {v: k for k, v in _CARGO_COL_MAP.items()}
-        or_clauses = []
-        for c in cargo:
-            col = reverse_cargo.get(c.strip())
-            if col:
-                or_clauses.append(f"c.{col} = 'X'")
-        if or_clauses:
-            conditions.append(f"({' OR '.join(or_clauses)})")
-
-    hazmat = filters.get("hazmat")
-    if hazmat == "true":
-        conditions.append("c.hm_ind = 'Y'")
-    elif hazmat == "false":
-        conditions.append("(c.hm_ind IS NULL OR c.hm_ind != 'Y')")
-
-    if filters.get("power_units_min") is not None:
-        conditions.append(f"c.power_units >= ${idx}")
-        params.append(filters["power_units_min"])
-        idx += 1
-    if filters.get("power_units_max") is not None:
-        conditions.append(f"c.power_units <= ${idx}")
-        params.append(filters["power_units_max"])
-        idx += 1
-    if filters.get("drivers_min") is not None:
-        conditions.append(f"c.total_drivers >= ${idx}")
-        params.append(filters["drivers_min"])
-        idx += 1
-    if filters.get("drivers_max") is not None:
-        conditions.append(f"c.total_drivers <= ${idx}")
-        params.append(filters["drivers_max"])
-        idx += 1
-
-    # ------------------------------------------------------------------
-    # Insurance-related filters – independent CTE-based pre-filtering
-    # ------------------------------------------------------------------
-    # Each independent insurance condition pre-selects qualifying
-    # docket_numbers from insurance_history via a CTE, then carriers
-    # are filtered with INNER JOINs using the expression index on
-    # (docket1prefix || docket1).  This is dramatically faster than
-    # correlated EXISTS on 4M+ carriers because:
-    #   1. insurance_history is scanned once per filter (not per carrier)
-    #   2. The expression index drives the carrier lookup
-    #   3. Each filter is independent so different insurance_history rows
-    #      can satisfy different filters (fixes the correctness bug where
-    #      the old consolidated EXISTS required one row to match ALL
-    #      conditions simultaneously).
-
-    _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
-    _IH_DOCKET_EXPR = "c.docket1prefix || c.docket1"
-    _ACTIVE_POLICY = "(cancl_effective_date IS NULL OR cancl_effective_date = '')"
-
-    # CTE parts: list of (cte_name, cte_sql)
-    _cte_parts: list[tuple[str, str]] = []
-    # JOIN clauses for positive insurance filters
-    _ins_joins: list[str] = []
-    _cte_idx = 0
-
-    def _add_positive_ins_filter(where_body: str):
-        """Register an insurance CTE and add an INNER JOIN for it."""
-        nonlocal _cte_idx
-        name = f"_ifd{_cte_idx}"
-        _cte_parts.append((
-            name,
-            f"SELECT DISTINCT docket_number FROM insurance_history WHERE {where_body}",
-        ))
-        _ins_joins.append(
-            f"INNER JOIN {name} ON {name}.docket_number = {_IH_DOCKET_EXPR}"
-        )
-        _cte_idx += 1
-
-    # insurance_required – carrier must have at least one active policy
-    # of any of the selected types (OR between types)
-    if filters.get("insurance_required"):
-        ins_types = filters["insurance_required"]
-        if isinstance(ins_types, str):
-            ins_types = ins_types.split(",")
-        or_parts = []
-        for itype in ins_types:
-            pattern = _INS_TYPE_PATTERN.get(itype, itype)
-            or_parts.append(f"(ins_type_desc LIKE ${idx} AND {_ACTIVE_POLICY})")
-            params.append(pattern)
-            idx += 1
-        _add_positive_ins_filter(" OR ".join(or_parts))
-
-    # BIPD / Cargo / Bond / Trust Fund on-file flags – each independent
-    for filter_key, pattern_val, use_like in [
-        ("bipd_on_file", "BIPD%", True),
-        ("cargo_on_file", "CARGO", False),
-        ("bond_on_file", "SURETY", False),
-        ("trust_fund_on_file", "TRUST FUND", False),
-    ]:
-        val = filters.get(filter_key)
-        if val is None:
-            continue
-        op = "LIKE" if use_like else "="
-        if val == "1":
-            _add_positive_ins_filter(
-                f"ins_type_desc {op} ${idx} AND {_ACTIVE_POLICY}"
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+            return await call_next(request)
+        user_payload = await require_auth(request)
+        if user_payload is None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Authentication required. Please log in."},
             )
-            params.append(pattern_val)
-            idx += 1
-        elif val == "0":
-            conditions.append(
-                f"NOT EXISTS (SELECT 1 FROM insurance_history ih "
-                f"WHERE ih.docket_number = {_IH_DOCKET_EXPR} "
-                f"AND ih.ins_type_desc {op} ${idx} "
-                f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
-            )
-            params.append(pattern_val)
-            idx += 1
+        request.state.user = user_payload
+        return await call_next(request)
 
-    # BIPD amount range – group min+max in one CTE so a single row
-    # must satisfy both bounds
-    _bipd_amount_conds: list[str] = []
-    if filters.get("bipd_min"):
-        raw_min = int(filters["bipd_min"])
-        compare_min = raw_min // 1000 if raw_min >= 10000 else raw_min
-        _bipd_amount_conds.append(
-            f"NULLIF(REPLACE(max_cov_amount, ',', ''), '')::numeric >= ${idx}"
-        )
-        params.append(compare_min)
-        idx += 1
-    if filters.get("bipd_max"):
-        raw_max = int(filters["bipd_max"])
-        compare_max = raw_max // 1000 if raw_max >= 10000 else raw_max
-        _bipd_amount_conds.append(
-            f"NULLIF(REPLACE(max_cov_amount, ',', ''), '')::numeric <= ${idx}"
-        )
-        params.append(compare_max)
-        idx += 1
-    if _bipd_amount_conds:
-        _add_positive_ins_filter(" AND ".join(_bipd_amount_conds))
 
-    # Insurance effective-date range – group from+to so one row must
-    # fall within the range
-    _eff_date_conds: list[str] = []
-    if filters.get("ins_effective_date_from"):
-        parts = filters["ins_effective_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _eff_date_conds.append(
-            f"TO_DATE(effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_from_db_fmt)
-        idx += 1
-    if filters.get("ins_effective_date_to"):
-        parts = filters["ins_effective_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _eff_date_conds.append(
-            f"TO_DATE(effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_to_db_fmt)
-        idx += 1
-    if _eff_date_conds:
-        _add_positive_ins_filter(
-            "effective_date IS NOT NULL AND effective_date LIKE '%/%/%' AND "
-            + " AND ".join(_eff_date_conds)
-        )
-
-    # Insurance cancellation-date range – group from+to
-    _cancl_date_conds: list[str] = []
-    if filters.get("ins_cancellation_date_from"):
-        parts = filters["ins_cancellation_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _cancl_date_conds.append(
-            f"TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_from_db_fmt)
-        idx += 1
-    if filters.get("ins_cancellation_date_to"):
-        parts = filters["ins_cancellation_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _cancl_date_conds.append(
-            f"TO_DATE(cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_to_db_fmt)
-        idx += 1
-    if _cancl_date_conds:
-        _add_positive_ins_filter(
-            "cancl_effective_date IS NOT NULL AND cancl_effective_date != '' "
-            "AND cancl_effective_date LIKE '%/%/%' AND "
-            + " AND ".join(_cancl_date_conds)
-        )
-
-    # Insurance Company filter
-    _INSURANCE_COMPANY_PATTERNS: dict[str, list[str]] = {
-        "GREAT WEST CASUALTY": ["GREAT WEST%"],
-        "UNITED FINANCIAL CASUALTY": ["UNITED FINANCIAL%"],
-        "GEICO MARINE": ["GEICO MARINE%"],
-        "NORTHLAND INSURANCE": ["NORTHLAND%"],
-        "ARTISAN & TRUCKERS": ["ARTISAN%", "TRUCKERS CASUALTY%"],
-        "CANAL INSURANCE": ["CANAL INS%"],
-        "PROGRESSIVE": ["PROGRESSIVE%"],
-        "BERKSHIRE HATHAWAY": ["BERKSHIRE%"],
-        "OLD REPUBLIC": ["OLD REPUBLIC%"],
-        "SENTRY": ["SENTRY%"],
-        "TRAVELERS": ["TRAVELERS%"],
-    }
-    if filters.get("insurance_company"):
-        companies = filters["insurance_company"]
-        if isinstance(companies, str):
-            companies = companies.split(",")
-        or_parts = []
-        for company in companies:
-            company_upper = company.strip().upper()
-            patterns = _INSURANCE_COMPANY_PATTERNS.get(company_upper, [f"{company_upper}%"])
-            for pattern in patterns:
-                or_parts.append(f"UPPER(name_company) LIKE ${idx}")
-                params.append(pattern)
-                idx += 1
-        _add_positive_ins_filter(
-            f"({' OR '.join(or_parts)}) "
-            f"AND (cancl_effective_date IS NULL OR cancl_effective_date = '' "
-            f"OR TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
-        )
-
-    # Next-renewal-date helper (computes next anniversary of effective_date)
-    _next_renewal_sql = (
-        "CASE "
-        "  WHEN MAKE_DATE("
-        "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
-        "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
-        "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
-        "       >= CURRENT_DATE "
-        "  THEN MAKE_DATE("
-        "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
-        "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
-        "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
-        "  ELSE MAKE_DATE("
-        "         EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
-        "                 EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
-        "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
-        "END"
-    )
-
-    # Active-policy guard for renewal filters (no ih. prefix – used in CTE)
-    _ACTIVE_POLICY_GUARD = (
-        "effective_date IS NOT NULL AND effective_date LIKE '%/%/%' "
-        "AND (cancl_effective_date IS NULL OR cancl_effective_date = '' "
-        "OR TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
-    )
-
-    # Renewal Policy Monthly filter
-    if filters.get("renewal_policy_months"):
-        months = int(filters["renewal_policy_months"])
-        _add_positive_ins_filter(
-            f"{_ACTIVE_POLICY_GUARD} AND "
-            f"({_next_renewal_sql}) BETWEEN CURRENT_DATE AND "
-            f"(DATE_TRUNC('MONTH', CURRENT_DATE + MAKE_INTERVAL(months => ${idx})) + INTERVAL '1 MONTH - 1 DAY')::date"
-        )
-        params.append(months)
-        idx += 1
-
-    # Renewal Policy Date range filter – group from+to
-    _renewal_date_conds: list[str] = []
-    if filters.get("renewal_date_from"):
-        parts = filters["renewal_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _renewal_date_conds.append(
-            f"({_next_renewal_sql}) >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_from_db_fmt)
-        idx += 1
-    if filters.get("renewal_date_to"):
-        parts = filters["renewal_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _renewal_date_conds.append(
-            f"({_next_renewal_sql}) <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_to_db_fmt)
-        idx += 1
-    if _renewal_date_conds:
-        _add_positive_ins_filter(
-            f"{_ACTIVE_POLICY_GUARD} AND " + " AND ".join(_renewal_date_conds)
-        )
-
-    # ------------------------------------------------------------------
-    # Default / WHERE / LIMIT / OFFSET
-    # ------------------------------------------------------------------
-    is_filtered = len(conditions) > 0 or len(_ins_joins) > 0
-    if not is_filtered:
-        conditions.append("c.status_code = 'A'")
-
-    where = " AND ".join(conditions) if conditions else "TRUE"
-
-    limit_val = min(int(filters.get("limit", 500)), 5000)
-    offset_val = int(filters.get("offset", 0))
-
-    # Select only the columns actually used by _carrier_row_to_dict
-    _LIST_COLS = """c.id, c.dot_number, c.legal_name, c.dba_name,
-        c.phone, c.email_address, c.fax,
-        c.power_units, c.total_drivers,
-        c.phy_street, c.phy_city, c.phy_state, c.phy_zip, c.phy_country,
-        c.carrier_mailing_street, c.carrier_mailing_city,
-        c.carrier_mailing_state, c.carrier_mailing_zip, c.carrier_mailing_country,
-        c.mcs150_date, c.mcs150_mileage, c.mcs150_mileage_year,
-        c.classdef, c.carrier_operation, c.hm_ind,
-        c.dun_bradstreet_no, c.safety_rating, c.safety_rating_date,
-        c.status_code, c.carship,
-        c.docket1prefix, c.docket1, c.docket2prefix, c.docket2,
-        c.docket3prefix, c.docket3, c.docket1_status_code,
-        c.company_officer_1, c.company_officer_2,
-        c.fleetsize, c.add_date, c.truck_units, c.bus_units,
-        c.interstate_beyond_100_miles, c.interstate_within_100_miles,
-        c.intrastate_beyond_100_miles, c.intrastate_within_100_miles,
-        c.crgo_genfreight, c.crgo_household, c.crgo_metalsheet, c.crgo_motoveh,
-        c.crgo_drivetow, c.crgo_logpole, c.crgo_bldgmat, c.crgo_mobilehome,
-        c.crgo_machlrg, c.crgo_produce, c.crgo_liqgas, c.crgo_intermodal,
-        c.crgo_passengers, c.crgo_oilfield, c.crgo_livestock, c.crgo_grainfeed,
-        c.crgo_coalcoke, c.crgo_meat, c.crgo_garbage, c.crgo_usmail,
-        c.crgo_chem, c.crgo_drybulk, c.crgo_coldfood, c.crgo_beverages,
-        c.crgo_paperprod, c.crgo_utility, c.crgo_farmsupp, c.crgo_construct,
-        c.crgo_waterwell, c.crgo_cargoothr, c.crgo_cargoothr_desc"""
-
-    # Build CTE prefix and FROM clause with JOINs
-    cte_prefix = ""
-    if _cte_parts:
-        cte_prefix = "WITH " + ", ".join(
-            f"{name} AS ({sql})" for name, sql in _cte_parts
-        ) + " "
-
-    from_clause = "carriers c"
-    if _ins_joins:
-        from_clause += " " + " ".join(_ins_joins)
-
-    query = f"""{cte_prefix}
-        SELECT {_LIST_COLS}
-        FROM {from_clause}
-        WHERE {where}
-        ORDER BY c.id DESC
-        LIMIT {limit_val} OFFSET {offset_val}
-    """
-
-    # ------------------------------------------------------------------
-    # Count strategy – exact COUNT(*) for filtered, pg_class for default
-    # ------------------------------------------------------------------
-    fast_count_query = """
-        SELECT reltuples::bigint AS cnt
-        FROM pg_class WHERE relname = 'carriers'
-    """
-
-    try:
-        use_fast_count = not is_filtered
-        if use_fast_count:
-            rows, count_row = await asyncio.gather(
-                pool.fetch(query, *params),
-                pool.fetchrow(fast_count_query),
-            )
-            filtered_count = count_row["cnt"] if count_row else 0
-        else:
-            count_query = f"""{cte_prefix}
-                SELECT COUNT(*) as cnt
-                FROM {from_clause}
-                WHERE {where}
-            """
-            rows, count_row = await asyncio.gather(
-                pool.fetch(query, *params),
-                pool.fetchrow(count_query, *params),
-            )
-            filtered_count = count_row["cnt"] if count_row else 0
-
-        # Batch-fetch insurance history for the returned rows
-        carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
-        docket_keys = []
-        for row in rows:
-            d = dict(row)
-            pfx = d.get("docket1prefix") or ""
-            num = d.get("docket1") or ""
-            docket_keys.append(f"{pfx}{num}" if pfx and num else "")
-
-        non_empty_keys = [k for k in docket_keys if k]
-        if non_empty_keys:
-            unique_keys = list(set(non_empty_keys))
-            ih_rows = await pool.fetch(
-                """
-                SELECT docket_number, ins_type_desc, max_cov_amount,
-                       underl_lim_amount, policy_no, effective_date,
-                       ins_form_code, name_company, trans_date,
-                       cancl_effective_date
-                FROM insurance_history
-                WHERE docket_number = ANY($1)
-                ORDER BY effective_date DESC
-                """,
-                unique_keys,
-            )
-            ih_map: dict[str, list[dict]] = {}
-            for ih_row in ih_rows:
-                dk = ih_row["docket_number"]
-                if dk not in ih_map:
-                    ih_map[dk] = []
-                ih_map[dk].append(dict(ih_row))
-
-            for i, carrier in enumerate(carrier_dicts):
-                dk = docket_keys[i]
-                if dk and dk in ih_map:
-                    carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
-
-        # Batch-fetch inspections from the new inspections table and attach
-        # them to each carrier by dot_number. The frontend expects
-        # carrier.inspections to be an array.
-        dot_numbers = []
-        for row in rows:
-            d = dict(row)
-            dn = d.get("dot_number")
-            if dn is not None:
-                try:
-                    dot_numbers.append(int(dn))
-                except (TypeError, ValueError):
-                    pass
-
-        if dot_numbers:
-            unique_dots = list(set(dot_numbers))
-            try:
-                insp_rows = await pool.fetch(
-                    """
-                    SELECT *
-                    FROM inspections
-                    WHERE dot_number = ANY($1)
-                    ORDER BY insp_date DESC NULLS LAST
-                    """,
-                    unique_dots,
+class IPBlockMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if request.method == "OPTIONS" or path in ("/health", "/healthz"):
+            return await call_next(request)
+        client_ip = _get_request_ip(request)
+        if client_ip:
+            blocked = await is_ip_blocked(client_ip)
+            if blocked:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "Your IP address has been blocked."},
                 )
-                insp_map: dict[int, list[dict]] = {}
-                for ir in insp_rows:
-                    d = _inspection_row_to_dict(ir)
-                    dn = d.get("dot_number")
-                    if dn is None:
-                        continue
-                    try:
-                        dn_int = int(dn)
-                    except (TypeError, ValueError):
-                        continue
-                    insp_map.setdefault(dn_int, []).append(d)
+        return await call_next(request)
 
-                for carrier in carrier_dicts:
-                    cdn = carrier.get("dot_number")
-                    try:
-                        cdn_int = int(cdn) if cdn is not None else None
-                    except (TypeError, ValueError):
-                        cdn_int = None
-                    if cdn_int is not None and cdn_int in insp_map:
-                        carrier["inspections"] = insp_map[cdn_int]
-                    else:
-                        carrier["inspections"] = []
-            except Exception as _e:
-                print(f"[DB] Warning: failed to batch-fetch inspections: {_e}")
-                for carrier in carrier_dicts:
-                    carrier.setdefault("inspections", [])
-        else:
-            for carrier in carrier_dicts:
-                carrier.setdefault("inspections", [])
 
-        return {
-            "data": carrier_dicts,
-            "filtered_count": filtered_count,
-        }
-    except Exception as e:
-        print(f"[DB] Error fetching carriers: {e}")
-        return {"data": [], "filtered_count": 0}
-
-async def delete_carrier(dot_number: str) -> bool:
-    """Delete a carrier by DOT number (Census schema uses dot_number as key)."""
-    pool = get_pool()
+app.add_middleware(AuthMiddleware)
+app.add_middleware(IPBlockMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
+_cors_raw = os.getenv("CORS_ORIGINS", "")
+if not _cors_raw:
+    import warnings
+    warnings.warn("CORS_ORIGINS is not set. Defaulting to restrictive CORS policy.")
+    _cors_origins = []
+else:
+    _cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins if _cors_origins else ["*"],
+    allow_credentials=bool(_cors_origins),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+ALLOWED_DOMAINS = {
+    "safer.fmcsa.dot.gov",
+    "ai.fmcsa.dot.gov",
+    "searchcarriers.com",
+    "www.searchcarriers.com",
+    "li-public.fmcsa.dot.gov",
+}
+@app.get("/healthz")
+async def healthz():
     try:
-        result = await pool.execute(
-            "DELETE FROM carriers WHERE dot_number = $1",
-            int(dot_number),
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error deleting carrier DOT {dot_number}: {e}")
-        return False
-
-async def get_carrier_count() -> int:
-    """Fast estimated count using pg_class reltuples (instant on large tables)."""
-    pool = get_pool()
-    row = await pool.fetchrow(
-        "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
-    )
-    return row["cnt"] if row else 0
-
-async def get_carrier_dashboard_stats() -> dict:
-    """Dashboard statistics for Census data (cached for 5 minutes)."""
-    global _dashboard_cache, _dashboard_cache_ts
-    now = _time.time()
-    if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
-        return _dashboard_cache
-
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status_code = 'A') AS active,
-                COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
-                COUNT(*) FILTER (WHERE hm_ind = 'Y') AS hazmat,
-                COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
-                COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
-                COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm
-            FROM carriers
-        """)
-        if not row:
-            return {}
-        result = {
-            "total": row["total"],
-            "active": row["active"],
-            "inactive": row["total"] - row["active"],
-            "withEmail": row["with_email"],
-            "hazmat": row["hazmat"],
-            "interstate": row["interstate"],
-            "intrastate_hm": row["intrastate_hm"],
-            "intrastate_non_hm": row["intrastate_non_hm"],
-        }
-        _dashboard_cache = result
-        _dashboard_cache_ts = now
-        return result
-    except Exception as e:
-        print(f"[DB] Error fetching dashboard stats: {e}")
-        return _dashboard_cache or {}
-
-async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
-    """Update safety-related fields for a carrier by DOT number."""
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            """
-            UPDATE carriers
-            SET safety_rating = $1,
-                safety_rating_date = $2
-            WHERE dot_number = $3
-            """,
-            safety_data.get("safety_rating"),
-            safety_data.get("safety_rating_date"),
-            int(dot_number),
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error updating safety for DOT {dot_number}: {e}")
-        return False
-
-# Select only the columns actually used by _carrier_row_to_dict (shared
-# with fetch_carriers) to avoid fetching 100+ unused columns per row.
-_MC_RANGE_COLS = """id, dot_number, legal_name, dba_name,
-    phone, email_address, fax,
-    power_units, total_drivers,
-    phy_street, phy_city, phy_state, phy_zip, phy_country,
-    carrier_mailing_street, carrier_mailing_city,
-    carrier_mailing_state, carrier_mailing_zip, carrier_mailing_country,
-    mcs150_date, mcs150_mileage, mcs150_mileage_year,
-    classdef, carrier_operation, hm_ind,
-    dun_bradstreet_no, safety_rating, safety_rating_date,
-    status_code, carship,
-    docket1prefix, docket1, docket2prefix, docket2,
-    docket3prefix, docket3, docket1_status_code,
-    company_officer_1, company_officer_2,
-    fleetsize, add_date, truck_units, bus_units,
-    interstate_beyond_100_miles, interstate_within_100_miles,
-    intrastate_beyond_100_miles, intrastate_within_100_miles,
-    crgo_genfreight, crgo_household, crgo_metalsheet, crgo_motoveh,
-    crgo_drivetow, crgo_logpole, crgo_bldgmat, crgo_mobilehome,
-    crgo_machlrg, crgo_produce, crgo_liqgas, crgo_intermodal,
-    crgo_passengers, crgo_oilfield, crgo_livestock, crgo_grainfeed,
-    crgo_coalcoke, crgo_meat, crgo_garbage, crgo_usmail,
-    crgo_chem, crgo_drybulk, crgo_coldfood, crgo_beverages,
-    crgo_paperprod, crgo_utility, crgo_farmsupp, crgo_construct,
-    crgo_waterwell, crgo_cargoothr, crgo_cargoothr_desc"""
-
-async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
-    """Fetch carriers whose docket1 number falls within start_mc..end_mc."""
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            f"""
-            SELECT {_MC_RANGE_COLS} FROM carriers
-            WHERE docket1 IS NOT NULL
-              AND docket1 ~ '^[0-9]+$'
-              AND docket1::bigint BETWEEN $1 AND $2
-            ORDER BY docket1::bigint
-            LIMIT 1000
-            """,
-            int(start_mc),
-            int(end_mc),
-        )
-        return [_carrier_row_to_dict(row) for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching MC range: {e}")
-        return []
-
-def _user_row_to_dict(row) -> dict:
-    d = dict(row)
-    d.pop("password_hash", None)
-    for key in ("created_at", "updated_at", "blocked_at"):
-        if key in d and d[key] is not None:
-            d[key] = d[key].isoformat()
-    if "id" in d and d["id"] is not None:
-        d["id"] = str(d["id"])
-    return d
-
-async def fetch_users() -> list[dict]:
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            "SELECT id, user_id, name, email, role, plan, daily_limit, "
-            "records_extracted_today, last_active, ip_address, is_online, "
-            "is_blocked, created_at, updated_at FROM users ORDER BY created_at DESC"
-        )
-        return [_user_row_to_dict(row) for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching users: {e}")
-        return []
-
-async def fetch_user_by_email(email: str) -> Optional[dict]:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow(
-            "SELECT id, user_id, name, email, role, plan, daily_limit, "
-            "records_extracted_today, last_active, ip_address, is_online, "
-            "is_blocked, created_at, updated_at FROM users WHERE email = $1",
-            email.lower(),
-        )
-        if row:
-            return _user_row_to_dict(row)
-        return None
-    except Exception as e:
-        print(f"[DB] Error fetching user by email: {e}")
-        return None
-
-async def create_user(user_data: dict) -> Optional[dict]:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow(
-            """
-            INSERT INTO users (user_id, name, email, password_hash, role, plan,
-                               daily_limit, records_extracted_today, last_active,
-                               ip_address, is_online, is_blocked)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            RETURNING *
-            """,
-            user_data.get("user_id"),
-            user_data.get("name"),
-            user_data.get("email", "").lower(),
-            user_data.get("password_hash"),
-            user_data.get("role", "user"),
-            user_data.get("plan", "Free"),
-            user_data.get("daily_limit", 50),
-            user_data.get("records_extracted_today", 0),
-            user_data.get("last_active", "Never"),
-            user_data.get("ip_address"),
-            user_data.get("is_online", False),
-            user_data.get("is_blocked", False),
-        )
-        if row:
-            return _user_row_to_dict(row)
-        return None
-    except Exception as e:
-        print(f"[DB] Error creating user: {e}")
-        return None
-
-async def update_user(user_id: str, user_data: dict) -> bool:
-    pool = get_pool()
-    _ALLOWED_COLUMNS = {
-        "name", "role", "plan", "daily_limit",
-        "records_extracted_today", "last_active",
-        "ip_address", "is_online", "is_blocked",
-    }
-    columns = {k: v for k, v in user_data.items() if k in _ALLOWED_COLUMNS}
-    if not columns:
-        return False
-    set_clauses = []
-    values = []
-    for idx, (col, val) in enumerate(columns.items(), start=1):
-        set_clauses.append(f"{col} = ${idx}")
-        values.append(val)
-    values.append(user_id)
-    query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${len(values)}"
-    try:
-        result = await pool.execute(query, *values)
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error updating user {user_id}: {e}")
-        return False
-
-async def delete_user(user_id: str) -> bool:
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            "DELETE FROM users WHERE user_id = $1", user_id
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error deleting user {user_id}: {e}")
-        return False
-
-async def get_user_password_hash(email: str) -> Optional[str]:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow(
-            "SELECT password_hash FROM users WHERE email = $1", email.lower()
-        )
-        if row and row["password_hash"]:
-            return row["password_hash"]
-        return None
-    except Exception as e:
-        print(f"[DB] Error fetching password hash: {e}")
-        return None
-
-async def fetch_blocked_ips() -> list[dict]:
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            "SELECT * FROM blocked_ips ORDER BY blocked_at DESC"
-        )
-        return [_user_row_to_dict(row) for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching blocked IPs: {e}")
-        return []
-
-async def block_ip(ip_address: str, reason: str) -> bool:
-    pool = get_pool()
-    try:
-        await pool.execute(
-            """
-            INSERT INTO blocked_ips (ip_address, reason)
-            VALUES ($1, $2)
-            ON CONFLICT (ip_address) DO NOTHING
-            """,
-            ip_address,
-            reason or "No reason provided",
-        )
-        return True
-    except Exception as e:
-        print(f"[DB] Error blocking IP {ip_address}: {e}")
-        return False
-
-async def unblock_ip(ip_address: str) -> bool:
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            "DELETE FROM blocked_ips WHERE ip_address = $1", ip_address
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error unblocking IP {ip_address}: {e}")
-        return False
-
-async def is_ip_blocked(ip_address: str) -> bool:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow(
-            "SELECT ip_address FROM blocked_ips WHERE ip_address = $1",
-            ip_address,
-        )
-        return row is not None
-    except Exception as e:
-        print(f"[DB] Error checking IP block status: {e}")
-        return False
-
-async def get_fmcsa_categories() -> list[str]:
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            "SELECT DISTINCT category FROM fmcsa_register WHERE category IS NOT NULL ORDER BY category"
-        )
-        return [row["category"] for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching FMCSA categories: {e}")
-        return []
-
-async def delete_fmcsa_entries_before_date(date: str) -> int:
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            "DELETE FROM fmcsa_register WHERE date_fetched < $1", date
-        )
-        parts = result.split(" ")
-        return int(parts[-1]) if len(parts) > 1 else 0
-    except Exception as e:
-        print(f"[DB] Error deleting FMCSA entries: {e}")
-        return 0
-
-def _to_jsonb(value) -> Optional[str]:
-    if value is None:
-        return None
-    return json.dumps(value)
-
-_NV_COLUMNS = [
-    "dot_number", "prefix", "docket_number", "status_code", "carship",
-    "carrier_operation", "name", "name_dba", "add_date", "chgn_date",
-    "common_stat", "contract_stat", "broker_stat",
-    "common_app_pend", "contract_app_pend", "broker_app_pend",
-    "common_rev_pend", "contract_rev_pend", "broker_rev_pend",
-    "property_chk", "passenger_chk", "hhg_chk", "private_auth_chk", "enterprise_chk",
-    "operating_status", "operating_status_indicator",
-    "phy_str", "phy_city", "phy_st", "phy_zip", "phy_country", "phy_cnty",
-    "mai_str", "mai_city", "mai_st", "mai_zip", "mai_country", "mai_cnty",
-    "phy_undeliv", "mai_undeliv",
-    "phy_phone", "phy_fax", "mai_phone", "mai_fax", "cell_phone", "email_address",
-    "company_officer_1", "company_officer_2",
-    "genfreight", "household", "metalsheet", "motorveh", "drivetow", "logpole",
-    "bldgmat", "mobilehome", "machlrg", "produce", "liqgas", "intermodal",
-    "passengers", "oilfield", "livestock", "grainfeed", "coalcoke", "meat",
-    "garbage", "usmail", "chem", "drybulk", "coldfood", "beverages",
-    "paperprod", "utility", "farmsupp", "construct", "waterwell",
-    "cargoothr", "cargoothr_desc",
-    "hm_ind", "bipd_req", "cargo_req", "bond_req", "bipd_file", "cargo_file", "bond_file",
-    "owntruck", "owntract", "owntrail", "owncoach",
-    "ownschool_1_8", "ownschool_9_15", "ownschool_16", "ownbus_16",
-    "ownvan_1_8", "ownvan_9_15", "ownlimo_1_8", "ownlimo_9_15", "ownlimo_16",
-    "trmtruck", "trmtract", "trmtrail", "trmcoach",
-    "trmschool_1_8", "trmschool_9_15", "trmschool_16", "trmbus_16",
-    "trmvan_1_8", "trmvan_9_15", "trmlimo_1_8", "trmlimo_9_15", "trmlimo_16",
-    "trptruck", "trptract", "trptrail", "trpcoach",
-    "trpschool_1_8", "trpschool_9_15", "trpschool_16", "trpbus_16",
-    "trpvan_1_8", "trpvan_9_15", "trplimo_1_8", "trplimo_9_15", "trplimo_16",
-    "total_trucks", "total_buses", "total_pwr", "fleetsize",
-    "inter_within_100", "inter_beyond_100", "total_inter_drivers",
-    "intra_within_100", "intra_beyond_100", "total_intra_drivers",
-    "total_drivers", "avg_tld", "total_cdl",
-    "review_type", "review_id", "review_date", "recordable_crash_rate",
-    "mcs150_mileage", "mcs151_mileage", "mcs150_mileage_year", "mcs150_date",
-    "safety_rating", "safety_rating_date",
-    "arber", "smartway", "tia", "tia_phone", "tia_contact_name",
-    "tia_tool_free", "tia_fax", "tia_email", "tia_website",
-    "phy_ups_store", "mai_ups_store", "phy_mail_box", "mai_mail_box",
-]
-
-def _new_venture_row_to_dict(row) -> dict:
-    d = dict(row)
-    if "raw_data" in d:
-        d["raw_data"] = _parse_jsonb(d["raw_data"])
-    for key in ("created_at", "updated_at"):
-        if key in d and d[key] is not None:
-            d[key] = d[key].isoformat()
-    if "id" in d and d["id"] is not None:
-        d["id"] = str(d["id"])
-    return d
-
-async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dict:
-    pool = get_pool()
-    if not entries:
-        return {"success": True, "saved": 0, "skipped": 0}
-
-    cols = _NV_COLUMNS + ["raw_data", "scrape_date"]
-    col_list = ", ".join(cols)
-    placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
-
-    update_cols = [c for c in cols if c not in ("dot_number", "add_date")]
-    on_conflict_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-    on_conflict_set += ", updated_at = NOW()"
-
-    insert_sql = f"""
-        INSERT INTO new_ventures ({col_list})
-        VALUES ({placeholders})
-        ON CONFLICT (dot_number, add_date) DO UPDATE SET {on_conflict_set}
-    """
-
-    saved = 0
-    skipped = 0
-    batch_size = 500
-
-    try:
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for i in range(0, len(entries), batch_size):
-                    batch = entries[i:i + batch_size]
-                    args = []
-                    for entry in batch:
-                        row_args = []
-                        for col in _NV_COLUMNS:
-                            val = entry.get(col)
-                            row_args.append(val.strip() if isinstance(val, str) else val)
-                        row_args.append(_to_jsonb(entry.get("raw_data")))
-                        row_args.append(scrape_date)
-                        args.append(tuple(row_args))
-                    await conn.executemany(insert_sql, args)
-                    saved += len(batch)
-    except Exception as e:
-        print(f"[DB] Error batch-saving new venture entries: {e}")
-        skipped = len(entries) - saved
-
-    return {"success": True, "saved": saved, "skipped": skipped}
-
-async def fetch_new_ventures(filters: dict) -> list[dict]:
-    pool = get_pool()
-
-    conditions: list[str] = []
-    params: list = []
-    idx = 1
-
-    if filters.get("docket_number"):
-        conditions.append(f"docket_number ILIKE ${idx}")
-        params.append(f"%{filters['docket_number']}%")
-        idx += 1
-
-    if filters.get("dot_number"):
-        conditions.append(f"dot_number ILIKE ${idx}")
-        params.append(f"%{filters['dot_number']}%")
-        idx += 1
-
-    if filters.get("company_name"):
-        conditions.append(f"(name ILIKE ${idx} OR name_dba ILIKE ${idx})")
-        params.append(f"%{filters['company_name']}%")
-        idx += 1
-
-    if filters.get("date_from"):
-        conditions.append(f"add_date >= ${idx}")
-        params.append(filters["date_from"])
-        idx += 1
-    if filters.get("date_to"):
-        conditions.append(f"add_date <= ${idx}")
-        params.append(filters["date_to"])
-        idx += 1
-
-    active = filters.get("active")
-    if active == "active":
-        conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
-        params.append("%AUTHORIZED%")
-        params.append("%NOT AUTHORIZED%")
-        params.append("ACTIVE")
-        idx += 3
-    elif active == "inactive":
-        conditions.append(f"(operating_status ILIKE ${idx} OR operating_status IS NULL OR operating_status = '')")
-        params.append("%NOT AUTHORIZED%")
-        idx += 1
-    elif active == "authorization_pending":
-        conditions.append(f"operating_status ILIKE ${idx}")
-        params.append("%PENDING%")
-        idx += 1
-    elif active == "not_authorized":
-        conditions.append(f"operating_status ILIKE ${idx}")
-        params.append("%NOT AUTHORIZED%")
-        idx += 1
-    elif active == "true":
-        conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
-        params.append("%AUTHORIZED%")
-        params.append("%NOT AUTHORIZED%")
-        params.append("ACTIVE")
-        idx += 3
-    elif active == "false":
-        conditions.append(f"operating_status NOT ILIKE ${idx}")
-        params.append("%AUTHORIZED%")
-        idx += 1
-
-    if filters.get("state"):
-        states = [s.strip().upper() for s in filters["state"].split("|") if s.strip()]
-        if len(states) == 1:
-            conditions.append(f"phy_st = ${idx}")
-            params.append(states[0])
-            idx += 1
-        elif states:
-            placeholders = ", ".join(f"${idx + i}" for i in range(len(states)))
-            conditions.append(f"phy_st IN ({placeholders})")
-            for s in states:
-                params.append(s)
-                idx += 1
-
-    has_email = filters.get("has_email")
-    if has_email == "true":
-        conditions.append("email_address IS NOT NULL AND email_address != ''")
-    elif has_email == "false":
-        conditions.append("(email_address IS NULL OR email_address = '')")
-
-    if filters.get("carrier_operation"):
-        conditions.append(f"carrier_operation ILIKE ${idx}")
-        params.append(f"%{filters['carrier_operation']}%")
-        idx += 1
-
-    if filters.get("hazmat"):
-        if filters["hazmat"] == "true":
-            conditions.append("hm_ind = 'Y'")
-        elif filters["hazmat"] == "false":
-            conditions.append("(hm_ind IS NULL OR hm_ind != 'Y')")
-
-    if filters.get("power_units_min") is not None:
-        conditions.append(f"total_pwr >= ${idx}")
-        params.append(filters["power_units_min"])
-        idx += 1
-    if filters.get("power_units_max") is not None:
-        conditions.append(f"total_pwr <= ${idx}")
-        params.append(filters["power_units_max"])
-        idx += 1
-
-    if filters.get("drivers_min") is not None:
-        conditions.append(f"total_drivers >= ${idx}")
-        params.append(filters["drivers_min"])
-        idx += 1
-    if filters.get("drivers_max") is not None:
-        conditions.append(f"total_drivers <= ${idx}")
-        params.append(filters["drivers_max"])
-        idx += 1
-
-    if filters.get("bipd_on_file"):
-        if filters["bipd_on_file"] == "true":
-            conditions.append("bipd_file = 'Y'")
-        elif filters["bipd_on_file"] == "false":
-            conditions.append("(bipd_file IS NULL OR bipd_file != 'Y')")
-    if filters.get("cargo_on_file"):
-        if filters["cargo_on_file"] == "true":
-            conditions.append("cargo_file = 'Y'")
-        elif filters["cargo_on_file"] == "false":
-            conditions.append("(cargo_file IS NULL OR cargo_file != 'Y')")
-    if filters.get("bond_on_file"):
-        if filters["bond_on_file"] == "true":
-            conditions.append("bond_file = 'Y'")
-        elif filters["bond_on_file"] == "false":
-            conditions.append("(bond_file IS NULL OR bond_file != 'Y')")
-
-    where = " AND ".join(conditions) if conditions else "TRUE"
-
-    is_filtered = len(conditions) > 0
-    if is_filtered:
-        limit_val = int(filters.get("limit", 10000))
+        from app.database import get_pool
+        pool = get_pool()
+        await pool.fetchval("SELECT 1")
+        return {"status": "ok"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "error": "database unreachable"})
+@app.get("/health")
+async def health():
+    return {"status": "ok", "message": "FMCSA Scraper Backend is running"}
+@app.get("/api/get-ip")
+async def get_ip(request: Request):
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
     else:
-        limit_val = int(filters.get("limit", 200))
-
-    offset_val = int(filters.get("offset", 0))
-
-    query = f"""
-        SELECT * FROM new_ventures
-        WHERE {where}
-        ORDER BY created_at DESC
-        LIMIT {limit_val} OFFSET {offset_val}
-    """
-
-    count_query = f"""
-        SELECT COUNT(*) as cnt FROM new_ventures
-        WHERE {where}
-    """
-
-    dates_query = "SELECT DISTINCT add_date FROM new_ventures WHERE add_date IS NOT NULL ORDER BY add_date DESC"
-
-    total_query = "SELECT COUNT(*) as cnt FROM new_ventures"
-
+        ip = request.headers.get("x-real-ip", "") or (request.client.host if request.client else "")
+    return {"ip": ip}
+@app.get("/api/proxy")
+async def proxy(url: str = Query(...)):
+    parsed = urlparse(url)
+    if not parsed.hostname or parsed.hostname not in ALLOWED_DOMAINS:
+        return JSONResponse(status_code=403, content={"error": "Domain not allowed"})
     try:
-        rows = await pool.fetch(query, *params)
-        count_row = await pool.fetchrow(count_query, *params)
-        filtered_count = count_row["cnt"] if count_row else 0
-        date_rows = await pool.fetch(dates_query)
-        available_dates = [r["add_date"] for r in date_rows]
-        total_row = await pool.fetchrow(total_query)
-        total_count = total_row["cnt"] if total_row else 0
-        return {
-            "data": [_new_venture_row_to_dict(row) for row in rows],
-            "filtered_count": filtered_count,
-            "total_count": total_count,
-            "available_dates": available_dates,
-        }
-    except Exception as e:
-        print(f"[DB] Error fetching new ventures: {e}")
-        return {"data": [], "filtered_count": 0, "total_count": 0, "available_dates": []}
-
-async def get_new_venture_count() -> int:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM new_ventures")
-        return row["cnt"] if row else 0
-    except Exception as e:
-        print(f"[DB] Error getting new venture count: {e}")
-        return 0
-
-async def get_new_venture_scraped_dates() -> list[str]:
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            "SELECT DISTINCT add_date FROM new_ventures WHERE add_date IS NOT NULL ORDER BY add_date DESC"
-        )
-        return [row["add_date"] for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching new venture dates: {e}")
-        return []
-
-async def fetch_new_venture_by_id(record_id: str) -> dict | None:
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow("SELECT * FROM new_ventures WHERE id = $1", record_id)
-        if row:
-            return _new_venture_row_to_dict(row)
-        return None
-    except Exception as e:
-        print(f"[DB] Error fetching new venture {record_id}: {e}")
-        return None
-
-async def delete_new_venture(record_id: str) -> bool:
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            "DELETE FROM new_ventures WHERE id = $1", record_id
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error deleting new venture {record_id}: {e}")
-        return False
-
-async def fetch_insurance_history(docket_number: str) -> list[dict]:
-    """Fetch insurance history by docket_number (e.g. 'MC123456').
-
-    The frontend passes the raw docket_number value which is already
-    in the format stored in insurance_history (docket1prefix || docket1).
-    """
-    pool = get_pool()
-    try:
-        rows = await pool.fetch(
-            """
-            SELECT docket_number, dot_number, ins_form_code, ins_type_desc,
-                   name_company, policy_no, trans_date, underl_lim_amount,
-                   max_cov_amount, effective_date, cancl_effective_date
-            FROM insurance_history
-            WHERE docket_number = $1
-            ORDER BY effective_date DESC
-            """,
-            docket_number,
-        )
-        results = []
-        for row in rows:
-            raw_amount = (row["max_cov_amount"] or "").strip()
-            try:
-                amount_int = int(raw_amount) * 1000
-                coverage = f"${amount_int:,}"
-            except (ValueError, TypeError):
-                coverage = raw_amount or "N/A"
-            cancl = (row["cancl_effective_date"] or "").strip()
-            results.append({
-                "type": (row["ins_type_desc"] or "").strip(),
-                "coverageAmount": coverage,
-                "policyNumber": (row["policy_no"] or "").strip(),
-                "effectiveDate": (row["effective_date"] or "").strip(),
-                "carrier": (row["name_company"] or "").strip(),
-                "formCode": (row["ins_form_code"] or "").strip(),
-                "transDate": (row["trans_date"] or "").strip(),
-                "underlLimAmount": (row["underl_lim_amount"] or "").strip(),
-                "canclEffectiveDate": cancl,
-                "status": "Cancelled" if cancl else "Active",
-            })
-        return results
-    except Exception as e:
-        print(f"[DB] Error fetching insurance history for {docket_number}: {e}")
-        return []
-
-
-# ── Inspections table functions ──────────────────────────────────────────────
-
-def _inspection_row_to_dict(row) -> dict:
-    """Convert a database row from the inspections table to a dictionary."""
-    d = dict(row)
-    return d
-
-async def fetch_inspections(filters: dict) -> dict:
-    """Fetch inspections from the inspections table with optional filters.
-    
-    Supported filters:
-    - dot_number: Filter by DOT number
-    - report_number: Filter by report number
-    - report_state: Filter by report state
-    - insp_date_from: Filter by inspection date (from)
-    - insp_date_to: Filter by inspection date (to)
-    - unsafe_insp: Filter by unsafe inspection (boolean)
-    - fatigued_insp: Filter by fatigued inspection (boolean)
-    - dr_fitness_insp: Filter by driver fitness inspection (boolean)
-    - subt_alcohol_insp: Filter by substance/alcohol inspection (boolean)
-    - vh_maint_insp: Filter by vehicle maintenance inspection (boolean)
-    - hm_insp: Filter by hazmat inspection (boolean)
-    - oos_min/max: Filter by out-of-service violations
-    - driver_oos_min/max: Filter by driver OOS violations
-    - vehicle_oos_min/max: Filter by vehicle OOS violations
-    - hazmat_oos_min/max: Filter by hazmat OOS violations
-    - basic_viol_min/max: Filter by basic violations
-    - unsafe_viol_min/max: Filter by unsafe violations
-    - fatigued_viol_min/max: Filter by fatigued violations
-    - dr_fitness_viol_min/max: Filter by driver fitness violations
-    - subt_alcohol_viol_min/max: Filter by substance/alcohol violations
-    - vh_maint_viol_min/max: Filter by vehicle maintenance violations
-    - hm_viol_min/max: Filter by hazmat violations
-    - limit: Number of results to return (default 500, max 5000)
-    - offset: Offset for pagination (default 0)
-    """
-    pool = get_pool()
-    
-    conditions: list[str] = []
-    params: list = []
-    idx = 1
-    
-    # Basic filters
-    if filters.get("dot_number"):
-        dot_val = filters["dot_number"].strip()
-        conditions.append(f"i.dot_number = ${idx}::bigint")
-        params.append(int(dot_val))
-        idx += 1
-    
-    if filters.get("report_number"):
-        conditions.append(f"i.report_number ILIKE ${idx}")
-        params.append(f"%{filters['report_number']}%")
-        idx += 1
-    
-    if filters.get("report_state"):
-        conditions.append(f"i.report_state = ${idx}")
-        params.append(filters["report_state"].upper())
-        idx += 1
-    
-    # Date range filters
-    if filters.get("insp_date_from"):
-        conditions.append(f"i.insp_date >= ${idx}")
-        params.append(filters["insp_date_from"])
-        idx += 1
-    
-    if filters.get("insp_date_to"):
-        conditions.append(f"i.insp_date <= ${idx}")
-        params.append(filters["insp_date_to"])
-        idx += 1
-    
-    # Inspection type filters (boolean flags)
-    if filters.get("unsafe_insp") == "true":
-        conditions.append("i.unsafe_insp = true")
-    elif filters.get("unsafe_insp") == "false":
-        conditions.append("i.unsafe_insp = false")
-    
-    if filters.get("fatigued_insp") == "true":
-        conditions.append("i.fatigued_insp = true")
-    elif filters.get("fatigued_insp") == "false":
-        conditions.append("i.fatigued_insp = false")
-    
-    if filters.get("dr_fitness_insp") == "true":
-        conditions.append("i.dr_fitness_insp = true")
-    elif filters.get("dr_fitness_insp") == "false":
-        conditions.append("i.dr_fitness_insp = false")
-    
-    if filters.get("subt_alcohol_insp") == "true":
-        conditions.append("i.subt_alcohol_insp = true")
-    elif filters.get("subt_alcohol_insp") == "false":
-        conditions.append("i.subt_alcohol_insp = false")
-    
-    if filters.get("vh_maint_insp") == "true":
-        conditions.append("i.vh_maint_insp = true")
-    elif filters.get("vh_maint_insp") == "false":
-        conditions.append("i.vh_maint_insp = false")
-    
-    if filters.get("hm_insp") == "true":
-        conditions.append("i.hm_insp = true")
-    elif filters.get("hm_insp") == "false":
-        conditions.append("i.hm_insp = false")
-    
-    # OOS violations filters
-    if filters.get("oos_min") is not None:
-        conditions.append(f"i.oos_total >= ${idx}")
-        params.append(int(filters["oos_min"]))
-        idx += 1
-    
-    if filters.get("oos_max") is not None:
-        conditions.append(f"i.oos_total <= ${idx}")
-        params.append(int(filters["oos_max"]))
-        idx += 1
-    
-    if filters.get("driver_oos_min") is not None:
-        conditions.append(f"i.driver_oos_total >= ${idx}")
-        params.append(int(filters["driver_oos_min"]))
-        idx += 1
-    
-    if filters.get("driver_oos_max") is not None:
-        conditions.append(f"i.driver_oos_total <= ${idx}")
-        params.append(int(filters["driver_oos_max"]))
-        idx += 1
-    
-    if filters.get("vehicle_oos_min") is not None:
-        conditions.append(f"i.vehicle_oos_total >= ${idx}")
-        params.append(int(filters["vehicle_oos_min"]))
-        idx += 1
-    
-    if filters.get("vehicle_oos_max") is not None:
-        conditions.append(f"i.vehicle_oos_total <= ${idx}")
-        params.append(int(filters["vehicle_oos_max"]))
-        idx += 1
-    
-    if filters.get("hazmat_oos_min") is not None:
-        conditions.append(f"i.hazmat_oos_total >= ${idx}")
-        params.append(int(filters["hazmat_oos_min"]))
-        idx += 1
-    
-    if filters.get("hazmat_oos_max") is not None:
-        conditions.append(f"i.hazmat_oos_total <= ${idx}")
-        params.append(int(filters["hazmat_oos_max"]))
-        idx += 1
-    
-    # Violations filters
-    if filters.get("basic_viol_min") is not None:
-        conditions.append(f"i.basic_viol >= ${idx}")
-        params.append(int(filters["basic_viol_min"]))
-        idx += 1
-    
-    if filters.get("basic_viol_max") is not None:
-        conditions.append(f"i.basic_viol <= ${idx}")
-        params.append(int(filters["basic_viol_max"]))
-        idx += 1
-    
-    if filters.get("unsafe_viol_min") is not None:
-        conditions.append(f"i.unsafe_viol >= ${idx}")
-        params.append(int(filters["unsafe_viol_min"]))
-        idx += 1
-    
-    if filters.get("unsafe_viol_max") is not None:
-        conditions.append(f"i.unsafe_viol <= ${idx}")
-        params.append(int(filters["unsafe_viol_max"]))
-        idx += 1
-    
-    if filters.get("fatigued_viol_min") is not None:
-        conditions.append(f"i.fatigued_viol >= ${idx}")
-        params.append(int(filters["fatigued_viol_min"]))
-        idx += 1
-    
-    if filters.get("fatigued_viol_max") is not None:
-        conditions.append(f"i.fatigued_viol <= ${idx}")
-        params.append(int(filters["fatigued_viol_max"]))
-        idx += 1
-    
-    if filters.get("dr_fitness_viol_min") is not None:
-        conditions.append(f"i.dr_fitness_viol >= ${idx}")
-        params.append(int(filters["dr_fitness_viol_min"]))
-        idx += 1
-    
-    if filters.get("dr_fitness_viol_max") is not None:
-        conditions.append(f"i.dr_fitness_viol <= ${idx}")
-        params.append(int(filters["dr_fitness_viol_max"]))
-        idx += 1
-    
-    if filters.get("subt_alcohol_viol_min") is not None:
-        conditions.append(f"i.subt_alcohol_viol >= ${idx}")
-        params.append(int(filters["subt_alcohol_viol_min"]))
-        idx += 1
-    
-    if filters.get("subt_alcohol_viol_max") is not None:
-        conditions.append(f"i.subt_alcohol_viol <= ${idx}")
-        params.append(int(filters["subt_alcohol_viol_max"]))
-        idx += 1
-    
-    if filters.get("vh_maint_viol_min") is not None:
-        conditions.append(f"i.vh_maint_viol >= ${idx}")
-        params.append(int(filters["vh_maint_viol_min"]))
-        idx += 1
-    
-    if filters.get("vh_maint_viol_max") is not None:
-        conditions.append(f"i.vh_maint_viol <= ${idx}")
-        params.append(int(filters["vh_maint_viol_max"]))
-        idx += 1
-    
-    if filters.get("hm_viol_min") is not None:
-        conditions.append(f"i.hm_viol >= ${idx}")
-        params.append(float(filters["hm_viol_min"]))
-        idx += 1
-    
-    if filters.get("hm_viol_max") is not None:
-        conditions.append(f"i.hm_viol <= ${idx}")
-        params.append(float(filters["hm_viol_max"]))
-        idx += 1
-    
-    # Build WHERE clause
-    where = " AND ".join(conditions) if conditions else "TRUE"
-    
-    limit_val = min(int(filters.get("limit", 500)), 5000)
-    offset_val = int(filters.get("offset", 0))
-    
-    # Select all columns from inspections table
-    _LIST_COLS = """i.unique_id, i.report_number, i.report_state, i.dot_number,
-        i.insp_date, i.insp_level_id, i.county_code_state, i.time_weight,
-        i.driver_oos_total, i.vehicle_oos_total, i.total_hazmat_sent, i.oos_total,
-        i.hazmat_oos_total, i.hazmat_placard_req,
-        i.unit_type_desc, i.unit_make, i.unit_license, i.unit_license_state,
-        i.vin, i.unit_decal_number,
-        i.unit_type_desc2, i.unit_make2, i.unit_license2, i.unit_license_state2,
-        i.vin2, i.unit_decal_number2,
-        i.unsafe_insp, i.fatigued_insp, i.dr_fitness_insp, i.subt_alcohol_insp,
-        i.vh_maint_insp, i.hm_insp,
-        i.basic_viol, i.unsafe_viol, i.fatigued_viol, i.dr_fitness_viol,
-        i.subt_alcohol_viol, i.vh_maint_viol, i.hm_viol"""
-    
-    query = f"""
-        SELECT {_LIST_COLS}
-        FROM inspections i
-        WHERE {where}
-        ORDER BY i.insp_date DESC, i.unique_id DESC
-        LIMIT {limit_val} OFFSET {offset_val}
-    """
-    
-    count_query = f"""
-        SELECT COUNT(*) as cnt
-        FROM inspections i
-        WHERE {where}
-    """
-    
-    try:
-        rows, count_row = await asyncio.gather(
-            pool.fetch(query, *params),
-            pool.fetchrow(count_query, *params),
-        )
-        filtered_count = count_row["cnt"] if count_row else 0
-        
-        inspection_dicts = [_inspection_row_to_dict(row) for row in rows]
-        
-        return {
-            "data": inspection_dicts,
-            "filtered_count": filtered_count,
-        }
-    except Exception as e:
-        print(f"[DB] Error fetching inspections: {e}")
-        return {"data": [], "filtered_count": 0}
-
-async def get_inspections_count() -> int:
-    """Get total count of inspections."""
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM inspections")
-        return row["cnt"] if row else 0
-    except Exception as e:
-        print(f"[DB] Error getting inspections count: {e}")
-        return 0
-
-async def get_inspections_dashboard_stats() -> dict:
-    """Get dashboard statistics for inspections."""
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE unsafe_insp = true) AS unsafe_inspections,
-                COUNT(*) FILTER (WHERE fatigued_insp = true) AS fatigued_inspections,
-                COUNT(*) FILTER (WHERE dr_fitness_insp = true) AS dr_fitness_inspections,
-                COUNT(*) FILTER (WHERE subt_alcohol_insp = true) AS substance_alcohol_inspections,
-                COUNT(*) FILTER (WHERE vh_maint_insp = true) AS vehicle_maintenance_inspections,
-                COUNT(*) FILTER (WHERE hm_insp = true) AS hazmat_inspections,
-                COUNT(*) FILTER (WHERE oos_total > 0) AS with_oos_violations,
-                AVG(oos_total) AS avg_oos_violations,
-                AVG(basic_viol) AS avg_basic_violations,
-                SUM(oos_total) AS total_oos_violations
-            FROM inspections
-        """)
-        if not row:
-            return {}
-        result = {
-            "total": row["total"],
-            "unsafeInspections": row["unsafe_inspections"],
-            "fatiguedInspections": row["fatigued_inspections"],
-            "drFitnessInspections": row["dr_fitness_inspections"],
-            "substanceAlcoholInspections": row["substance_alcohol_inspections"],
-            "vehicleMaintenanceInspections": row["vehicle_maintenance_inspections"],
-            "hazmatInspections": row["hazmat_inspections"],
-            "withOosViolations": row["with_oos_violations"],
-            "avgOosViolations": float(row["avg_oos_violations"]) if row["avg_oos_violations"] else 0,
-            "avgBasicViolations": float(row["avg_basic_violations"]) if row["avg_basic_violations"] else 0,
-            "totalOosViolations": int(row["total_oos_violations"]) if row["total_oos_violations"] else 0,
-        }
+        if "searchcarriers.com" in url:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Referer": "https://searchcarriers.com/",
+                "Origin": "https://searchcarriers.com",
+            }
+        else:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.is_redirect:
+            return JSONResponse(status_code=502, content={"error": "Upstream redirect not allowed"})
+        content_type = resp.headers.get("content-type", "text/html; charset=utf-8")
+        return PlainTextResponse(content=resp.text, status_code=resp.status_code, headers={
+            "Content-Type": content_type,
+            "Access-Control-Allow-Origin": "*",
+        })
+    except Exception:
+        return JSONResponse(status_code=500, content={"error": "Proxy request failed"})
+@app.post("/api/fmcsa-register")
+async def fmcsa_register(request: Request):
+    body = await request.json()
+    date_str = body.get("date", None)
+    save_to_db = body.get("saveToDb", False)
+    result = await scrape_fmcsa_register(date_str)
+    if result.get("success") and save_to_db:
+        entries = result.get("entries", [])
+        extracted_date = result.get("date", "")
+        db_result = await save_fmcsa_register_entries(entries, extracted_date)
+        result["dbSaved"] = db_result.get("saved", 0)
+        result["dbSkipped"] = db_result.get("skipped", 0)
+    if result.get("success"):
         return result
-    except Exception as e:
-        print(f"[DB] Error fetching inspections dashboard stats: {e}")
-        return {}
-
-async def fetch_inspection_by_id(unique_id: int) -> dict | None:
-    """Fetch a single inspection by unique_id."""
-    pool = get_pool()
-    try:
-        row = await pool.fetchrow(
-            "SELECT * FROM inspections WHERE unique_id = $1",
-            unique_id,
+    return JSONResponse(status_code=500 if "error" in result else 400, content=result)
+@app.get("/api/fmcsa-register/entries")
+async def get_fmcsa_entries(
+    extracted_date: str = Query(...),
+    category: str = Query(None),
+    search: str = Query(None),
+):
+    entries = await fetch_fmcsa_register_by_date(extracted_date, category, search)
+    return {"success": True, "count": len(entries), "entries": entries}
+@app.get("/api/fmcsa-register/dates")
+async def get_fmcsa_dates():
+    dates = await get_fmcsa_extracted_dates()
+    return {"success": True, "dates": dates}
+@app.get("/api/scrape/carrier/{mc_number}")
+async def scrape_single_carrier(mc_number: str):
+    data = await scrape_carrier(mc_number)
+    if data:
+        return data
+    return JSONResponse(status_code=404, content={"error": "No data found"})
+@app.get("/api/scrape/safety/{dot_number}")
+async def scrape_safety(dot_number: str):
+    data = await fetch_safety_data(dot_number)
+    return data
+@app.get("/api/scrape/insurance/{dot_number}")
+async def scrape_insurance(dot_number: str):
+    data = await fetch_insurance_data(dot_number)
+    return data
+@app.post("/api/tasks/scraper/start")
+async def start_scraper_task(request: Request):
+    body = await request.json()
+    config = body.get("config", {})
+    task_id = await task_manager.start_scraper_task(config)
+    return {"task_id": task_id, "status": "started"}
+@app.post("/api/tasks/scraper/stop")
+async def stop_scraper_task(request: Request):
+    body = await request.json()
+    task_id = body.get("task_id")
+    if not task_id:
+        return JSONResponse(status_code=400, content={"error": "task_id required"})
+    task_manager.stop_task(task_id)
+    return {"task_id": task_id, "status": "stopping"}
+@app.get("/api/tasks/scraper/status")
+async def get_scraper_status(task_id: str = Query(...)):
+    status = task_manager.get_task_status(task_id)
+    if not status:
+        return JSONResponse(status_code=404, content={"error": "Task not found"})
+    return status
+@app.post("/api/tasks/insurance/start")
+async def start_insurance_task(request: Request):
+    body = await request.json()
+    config = body.get("config", {})
+    task_id = await task_manager.start_insurance_task(config)
+    return {"task_id": task_id, "status": "started"}
+@app.post("/api/tasks/insurance/stop")
+async def stop_insurance_task(request: Request):
+    body = await request.json()
+    task_id = body.get("task_id")
+    if not task_id:
+        return JSONResponse(status_code=400, content={"error": "task_id required"})
+    task_manager.stop_task(task_id)
+    return {"task_id": task_id, "status": "stopping"}
+@app.get("/api/tasks/insurance/status")
+async def get_insurance_status(task_id: str = Query(...)):
+    status = task_manager.get_task_status(task_id)
+    if not status:
+        return JSONResponse(status_code=404, content={"error": "Task not found"})
+    return status
+@app.get("/api/tasks/scraper/data")
+async def get_scraper_data(task_id: str = Query(...)):
+    data = task_manager.get_task_data(task_id)
+    if data is None:
+        return JSONResponse(status_code=404, content={"error": "Task not found"})
+    return data
+@app.get("/api/tasks/active")
+async def get_active_task(task_type: str = Query("scraper")):
+    task_id = task_manager.get_active_task_id(task_type)
+    if not task_id:
+        return {"task_id": None}
+    status = task_manager.get_task_status(task_id)
+    return {"task_id": task_id, "task": status}
+@app.get("/api/tasks")
+async def list_tasks():
+    return task_manager.list_tasks()
+@app.get("/api/carriers")
+async def api_fetch_carriers(
+    mc_number: str = Query(None),
+    dot_number: str = Query(None),
+    legal_name: str = Query(None),
+    entity_type: str = Query(None),
+    active: str = Query(None),
+    state: str = Query(None),
+    has_email: str = Query(None),
+    has_boc3: str = Query(None),
+    has_company_rep: str = Query(None),
+    classification: str = Query(None),
+    carrier_operation: str = Query(None),
+    cargo: str = Query(None),
+    hazmat: str = Query(None),
+    power_units_min: str = Query(None),
+    power_units_max: str = Query(None),
+    drivers_min: str = Query(None),
+    drivers_max: str = Query(None),
+    insurance_required: str = Query(None),
+    bipd_min: str = Query(None),
+    bipd_max: str = Query(None),
+    ins_effective_date_from: str = Query(None),
+    ins_effective_date_to: str = Query(None),
+    bipd_on_file: str = Query(None),
+    cargo_on_file: str = Query(None),
+    bond_on_file: str = Query(None),
+    trust_fund_on_file: str = Query(None),
+    ins_cancellation_date_from: str = Query(None),
+    ins_cancellation_date_to: str = Query(None),
+    years_in_business_min: str = Query(None),
+    years_in_business_max: str = Query(None),
+    oos_min: str = Query(None),
+    oos_max: str = Query(None),
+    crashes_min: str = Query(None),
+    crashes_max: str = Query(None),
+    injuries_min: str = Query(None),
+    injuries_max: str = Query(None),
+    fatalities_min: str = Query(None),
+    fatalities_max: str = Query(None),
+    toway_min: str = Query(None),
+    toway_max: str = Query(None),
+    inspections_min: str = Query(None),
+    inspections_max: str = Query(None),
+    insurance_company: str = Query(None),
+    renewal_policy_months: str = Query(None),
+    renewal_date_from: str = Query(None),
+    renewal_date_to: str = Query(None),
+    limit: int = Query(None),
+    offset: int = Query(0),
+):
+    filters = {}
+    if mc_number: filters["mc_number"] = mc_number
+    if dot_number: filters["dot_number"] = dot_number
+    if legal_name: filters["legal_name"] = legal_name
+    if entity_type: filters["entity_type"] = entity_type
+    if active: filters["active"] = active
+    if state: filters["state"] = state
+    if has_email: filters["has_email"] = has_email
+    if has_boc3: filters["has_boc3"] = has_boc3
+    if has_company_rep: filters["has_company_rep"] = has_company_rep
+    if classification: filters["classification"] = classification.split(",")
+    if carrier_operation: filters["carrier_operation"] = carrier_operation.split(",")
+    if cargo: filters["cargo"] = cargo.split(",")
+    if hazmat: filters["hazmat"] = hazmat
+    if power_units_min:
+        try:
+            filters["power_units_min"] = int(power_units_min)
+        except ValueError:
+            pass
+    if power_units_max:
+        try:
+            filters["power_units_max"] = int(power_units_max)
+        except ValueError:
+            pass
+    if drivers_min:
+        try:
+            filters["drivers_min"] = int(drivers_min)
+        except ValueError:
+            pass
+    if drivers_max:
+        try:
+            filters["drivers_max"] = int(drivers_max)
+        except ValueError:
+            pass
+    if insurance_required: filters["insurance_required"] = insurance_required.split(",")
+    if bipd_min: filters["bipd_min"] = bipd_min
+    if bipd_max: filters["bipd_max"] = bipd_max
+    if ins_effective_date_from: filters["ins_effective_date_from"] = ins_effective_date_from
+    if ins_effective_date_to: filters["ins_effective_date_to"] = ins_effective_date_to
+    if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
+    if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
+    if bond_on_file: filters["bond_on_file"] = bond_on_file
+    if trust_fund_on_file: filters["trust_fund_on_file"] = trust_fund_on_file
+    if ins_cancellation_date_from: filters["ins_cancellation_date_from"] = ins_cancellation_date_from
+    if ins_cancellation_date_to: filters["ins_cancellation_date_to"] = ins_cancellation_date_to
+    if years_in_business_min: filters["years_in_business_min"] = years_in_business_min
+    if years_in_business_max: filters["years_in_business_max"] = years_in_business_max
+    if oos_min: filters["oos_min"] = oos_min
+    if oos_max: filters["oos_max"] = oos_max
+    if crashes_min: filters["crashes_min"] = crashes_min
+    if crashes_max: filters["crashes_max"] = crashes_max
+    if injuries_min: filters["injuries_min"] = injuries_min
+    if injuries_max: filters["injuries_max"] = injuries_max
+    if fatalities_min: filters["fatalities_min"] = fatalities_min
+    if fatalities_max: filters["fatalities_max"] = fatalities_max
+    if toway_min: filters["toway_min"] = toway_min
+    if toway_max: filters["toway_max"] = toway_max
+    if inspections_min: filters["inspections_min"] = inspections_min
+    if inspections_max: filters["inspections_max"] = inspections_max
+    if insurance_company: filters["insurance_company"] = insurance_company
+    if renewal_policy_months: filters["renewal_policy_months"] = renewal_policy_months
+    if renewal_date_from: filters["renewal_date_from"] = renewal_date_from
+    if renewal_date_to: filters["renewal_date_to"] = renewal_date_to
+    if offset > 0: filters["offset"] = offset
+    if limit is not None:
+        filters["limit"] = limit
+    else:
+        filters["limit"] = 500
+    result = await fetch_carriers(filters)
+    return result
+@app.post("/api/carriers")
+async def api_upsert_carrier(request: Request):
+    body = await request.json()
+    ok = await upsert_carrier(body)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=400, content={"success": False, "error": "Failed to upsert carrier"})
+@app.post("/api/carriers/batch")
+async def api_upsert_carriers_batch(request: Request):
+    body = await request.json()
+    carriers_list = body.get("carriers", [])
+    saved = 0
+    failed = 0
+    batch_size = 10
+    for i in range(0, len(carriers_list), batch_size):
+        batch = carriers_list[i:i + batch_size]
+        results = await asyncio.gather(
+            *(upsert_carrier(c) for c in batch),
+            return_exceptions=True,
         )
-        if row:
-            return _inspection_row_to_dict(row)
-        return None
-    except Exception as e:
-        print(f"[DB] Error fetching inspection {unique_id}: {e}")
-        return None
-
-async def fetch_inspections_by_dot(dot_number: int) -> list[dict]:
-    """Fetch all inspections for a specific DOT number."""
-    pool = get_pool()
+        for ok in results:
+            if ok is True:
+                saved += 1
+            else:
+                failed += 1
+    return {"success": failed == 0, "saved": saved, "failed": failed}
+@app.delete("/api/carriers/{dot_number}")
+async def api_delete_carrier(dot_number: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    ok = await db_delete_carrier(dot_number)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found"})
+@app.get("/api/carriers/count")
+async def api_get_carrier_count():
+    count = await get_carrier_count()
+    return {"count": count}
+@app.get("/api/carriers/dashboard-stats")
+async def api_get_carrier_dashboard_stats():
+    stats = await get_carrier_dashboard_stats()
+    return stats
+@app.put("/api/carriers/{dot_number}/insurance")
+async def api_update_carrier_insurance(dot_number: str, request: Request):
+    body = await request.json()
+    policies = body.get("policies", [])
+    ok = await db_update_carrier_insurance(dot_number, policies)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found or update failed"})
+@app.put("/api/carriers/{dot_number}/safety")
+async def api_update_carrier_safety(dot_number: str, request: Request):
+    body = await request.json()
+    ok = await db_update_carrier_safety(dot_number, body)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found or update failed"})
+@app.get("/api/carriers/range")
+async def api_get_carriers_by_range(
+    start: str = Query(...),
+    end: str = Query(...),
+):
+    data = await get_carriers_by_mc_range(start, end)
+    return data
+@app.post("/api/auth/login")
+async def api_auth_login(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"login:{client_ip}"):
+        return JSONResponse(status_code=429, content={"error": "Too many login attempts. Please try again later."})
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    if not email or not password:
+        return JSONResponse(status_code=400, content={"error": "Email and password are required"})
+    stored_hash = await get_user_password_hash(email)
+    if not stored_hash:
+        return JSONResponse(status_code=401, content={"error": "Invalid email or password"})
+    import bcrypt
+    if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
+        if not bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
+            return JSONResponse(status_code=401, content={"error": "Invalid email or password"})
+    else:
+        return JSONResponse(status_code=401, content={"error": "Invalid email or password"})
+    user = await fetch_user_by_email(email)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Invalid email or password"})
+    token = create_token(
+        user_id=user["user_id"],
+        email=user["email"],
+        role=user["role"],
+    )
+    return {
+        "token": token,
+        "user": {
+            "user_id": user["user_id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": user["role"],
+            "plan": user["plan"],
+            "daily_limit": user["daily_limit"],
+            "records_extracted_today": user["records_extracted_today"],
+            "last_active": user.get("last_active", "Never"),
+            "ip_address": user.get("ip_address", ""),
+            "is_online": user.get("is_online", False),
+            "is_blocked": user.get("is_blocked", False),
+        },
+    }
+@app.post("/api/auth/register")
+async def api_auth_register(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"register:{client_ip}", max_requests=5):
+        return JSONResponse(status_code=429, content={"error": "Too many registration attempts. Please try again later."})
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    name = body.get("name", "")
+    if not email or not password or not name:
+        return JSONResponse(status_code=400, content={"error": "Name, email, and password are required"})
+    if len(password) < 8:
+        return JSONResponse(status_code=400, content={"error": "Password must be at least 8 characters long"})
+    if not re.search(r"\d", password) or not re.search(r"[a-zA-Z]", password):
+        return JSONResponse(status_code=400, content={"error": "Password must contain at least one letter and one number"})
+    existing = await fetch_user_by_email(email)
+    if existing:
+        return JSONResponse(status_code=409, content={"error": "User with this email already exists"})
+    import bcrypt
+    import time as _time
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user_data = {
+        "user_id": body.get("user_id", f"user-{int(_time.time() * 1000)}"),
+        "name": name,
+        "email": email,
+        "password_hash": password_hash,
+        "role": "user",
+        "plan": "Free",
+        "daily_limit": 50,
+        "records_extracted_today": 0,
+        "last_active": "Now",
+        "ip_address": body.get("ip_address", ""),
+        "is_online": True,
+        "is_blocked": False,
+    }
+    user = await create_user(user_data)
+    if not user:
+        return JSONResponse(status_code=500, content={"error": "Failed to create user"})
+    token = create_token(
+        user_id=user["user_id"],
+        email=user["email"],
+        role=user["role"],
+    )
+    user.pop("password_hash", None)
+    return {"token": token, "user": user}
+@app.get("/api/users")
+async def api_fetch_users(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    users = await fetch_users()
+    return users
+@app.get("/api/users/by-email/{email:path}")
+async def api_fetch_user_by_email(email: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    user = await fetch_user_by_email(email)
+    if user:
+        return user
+    return JSONResponse(status_code=404, content={"error": "User not found"})
+@app.post("/api/users")
+async def api_create_user(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    body = await request.json()
+    if body.get("password"):
+        import bcrypt
+        body["password_hash"] = bcrypt.hashpw(
+            body.pop("password").encode("utf-8"),
+            bcrypt.gensalt(),
+        ).decode("utf-8")
+    user = await create_user(body)
+    if user:
+        user.pop("password_hash", None)
+        return user
+    return JSONResponse(status_code=400, content={"error": "Failed to create user"})
+@app.put("/api/users/{user_id}")
+async def api_update_user(user_id: str, request: Request):
+    current_user = getattr(request.state, "user", None)
+    if not current_user:
+        return JSONResponse(status_code=401, content={"error": "Authentication required"})
+    body = await request.json()
+    is_admin = current_user.get("role") == "admin"
+    is_self = current_user.get("sub") == user_id
+    if not is_admin and not is_self:
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    if is_self and not is_admin:
+        _SELF_ALLOWED_FIELDS = {"name", "is_online", "last_active", "ip_address"}
+        restricted = set(body.keys()) - _SELF_ALLOWED_FIELDS
+        if restricted:
+            return JSONResponse(
+                status_code=403,
+                content={"error": f"Cannot modify restricted fields: {', '.join(sorted(restricted))}"},
+            )
+    ok = await update_user(user_id, body)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
+@app.delete("/api/users/{user_id}")
+async def api_delete_user(user_id: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    ok = await delete_user(user_id)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "User not found"})
+@app.post("/api/users/verify-password")
+async def api_verify_password(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"verify:{client_ip}"):
+        return JSONResponse(status_code=429, content={"error": "Too many attempts. Please try again later."})
+    body = await request.json()
+    email = body.get("email", "")
+    password = body.get("password", "")
+    stored_hash = await get_user_password_hash(email)
+    if not stored_hash:
+        return {"valid": False}
+    import bcrypt
+    if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
+        if password:
+            is_valid = bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+            return {"valid": is_valid}
+        return {"valid": False}
+    return {"valid": False}
+@app.get("/api/blocked-ips")
+async def api_fetch_blocked_ips(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    ips = await fetch_blocked_ips()
+    return ips
+@app.post("/api/blocked-ips")
+async def api_block_ip(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    body = await request.json()
+    ip = body.get("ip_address", "")
     try:
-        rows = await pool.fetch(
-            """
-            SELECT * FROM inspections
-            WHERE dot_number = $1
-            ORDER BY insp_date DESC
-            """,
-            dot_number,
-        )
-        return [_inspection_row_to_dict(row) for row in rows]
-    except Exception as e:
-        print(f"[DB] Error fetching inspections for DOT {dot_number}: {e}")
-        return []
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Invalid IP address format"})
+    reason = body.get("reason", "No reason provided")
+    ok = await block_ip(ip, reason)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=400, content={"success": False, "error": "Failed to block IP"})
+@app.delete("/api/blocked-ips/{ip_address}")
+async def api_unblock_ip(ip_address: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    ok = await unblock_ip(ip_address)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "IP not found"})
+@app.get("/api/blocked-ips/check/{ip_address}")
+async def api_check_ip_blocked(ip_address: str):
+    blocked = await is_ip_blocked(ip_address)
+    return {"blocked": blocked}
+@app.post("/api/fmcsa-register/save")
+async def api_save_fmcsa_entries(request: Request):
+    body = await request.json()
+    entries = body.get("entries", [])
+    extracted_date = body.get("extractedDate", "")
+    result = await save_fmcsa_register_entries(entries, extracted_date)
+    return result
+@app.get("/api/fmcsa-register/categories")
+async def api_get_fmcsa_categories():
+    categories = await get_fmcsa_categories()
+    return {"categories": categories}
+@app.delete("/api/fmcsa-register/before/{date}")
+async def api_delete_fmcsa_before_date(date: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    deleted = await delete_fmcsa_entries_before_date(date)
+    return {"success": True, "deleted": deleted}
+@app.post("/api/new-ventures/scrape")
+async def api_scrape_new_ventures(request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    body = await request.json()
+    added_date = body.get("added_date", "")
+    if not added_date:
+        return JSONResponse(status_code=400, content={"error": "added_date is required (YYYY-MM-DD)"})
+    import datetime
+    scrape_date = datetime.date.today().isoformat()
+    result = await scrape_broker_snapshot(added_date)
+    if not result.get("success"):
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "error": result.get("error", "Scrape failed"),
+        })
+    rows = result.get("rows", [])
+    db_result = await save_new_venture_entries(rows, scrape_date)
+    return {
+        "success": True,
+        "scraped": len(rows),
+        "saved": db_result.get("saved", 0),
+        "skipped": db_result.get("skipped", 0),
+    }
+@app.get("/api/new-ventures")
+async def api_fetch_new_ventures(
+    docket_number: str = Query(None),
+    dot_number: str = Query(None),
+    company_name: str = Query(None),
+    date_from: str = Query(None),
+    date_to: str = Query(None),
+    active: str = Query(None),
+    state: str = Query(None),
+    has_email: str = Query(None),
+    carrier_operation: str = Query(None),
+    hazmat: str = Query(None),
+    power_units_min: str = Query(None),
+    power_units_max: str = Query(None),
+    drivers_min: str = Query(None),
+    drivers_max: str = Query(None),
+    bipd_on_file: str = Query(None),
+    cargo_on_file: str = Query(None),
+    bond_on_file: str = Query(None),
+    limit: int = Query(None),
+    offset: int = Query(0),
+):
+    filters = {}
+    if docket_number: filters["docket_number"] = docket_number
+    if dot_number: filters["dot_number"] = dot_number
+    if company_name: filters["company_name"] = company_name
+    if date_from: filters["date_from"] = date_from
+    if date_to: filters["date_to"] = date_to
+    if active: filters["active"] = active
+    if state: filters["state"] = state
+    if has_email: filters["has_email"] = has_email
+    if carrier_operation: filters["carrier_operation"] = carrier_operation
+    if hazmat: filters["hazmat"] = hazmat
+    if power_units_min:
+        try:
+            filters["power_units_min"] = int(power_units_min)
+        except ValueError:
+            pass
+    if power_units_max:
+        try:
+            filters["power_units_max"] = int(power_units_max)
+        except ValueError:
+            pass
+    if drivers_min:
+        try:
+            filters["drivers_min"] = int(drivers_min)
+        except ValueError:
+            pass
+    if drivers_max:
+        try:
+            filters["drivers_max"] = int(drivers_max)
+        except ValueError:
+            pass
+    if bipd_on_file: filters["bipd_on_file"] = bipd_on_file
+    if cargo_on_file: filters["cargo_on_file"] = cargo_on_file
+    if bond_on_file: filters["bond_on_file"] = bond_on_file
+    if offset > 0: filters["offset"] = offset
+    if limit is not None:
+        filters["limit"] = limit
+    else:
+        filters["limit"] = 500
+    result = await fetch_new_ventures(filters)
+    return result
+@app.get("/api/new-ventures/count")
+async def api_get_new_venture_count():
+    count = await get_new_venture_count()
+    return {"count": count}
+@app.get("/api/new-ventures/dates")
+async def api_get_new_venture_dates():
+    dates = await get_new_venture_scraped_dates()
+    return {"success": True, "dates": dates}
+@app.get("/api/new-ventures/detail/{record_id}")
+async def api_get_new_venture_detail(record_id: str):
+    record = await fetch_new_venture_by_id(record_id)
+    if record:
+        return record
+    return JSONResponse(status_code=404, content={"error": "Record not found"})
+@app.delete("/api/new-ventures/{record_id}")
+async def api_delete_new_venture(record_id: str, request: Request):
+    if not _require_admin(request):
+        return JSONResponse(status_code=403, content={"error": "Admin access required"})
+    ok = await delete_new_venture(record_id)
+    if ok:
+        return {"success": True}
+    return JSONResponse(status_code=404, content={"success": False, "error": "Record not found"})
+@app.get("/api/carriers/{docket_number}/insurance-history")
+async def api_get_insurance_history(docket_number: str):
+    policies = await fetch_insurance_history(docket_number)
+    return {"success": True, "docket_number": docket_number, "policies": policies, "count": len(policies)}
+
+# ── Inspections API endpoints ────────────────────────────────────────────────
+
+@app.get("/api/inspections")
+async def api_fetch_inspections(
+    dot_number: str = Query(None),
+    report_number: str = Query(None),
+    report_state: str = Query(None),
+    insp_date_from: str = Query(None),
+    insp_date_to: str = Query(None),
+    unsafe_insp: str = Query(None),
+    fatigued_insp: str = Query(None),
+    dr_fitness_insp: str = Query(None),
+    subt_alcohol_insp: str = Query(None),
+    vh_maint_insp: str = Query(None),
+    hm_insp: str = Query(None),
+    oos_min: str = Query(None),
+    oos_max: str = Query(None),
+    driver_oos_min: str = Query(None),
+    driver_oos_max: str = Query(None),
+    vehicle_oos_min: str = Query(None),
+    vehicle_oos_max: str = Query(None),
+    hazmat_oos_min: str = Query(None),
+    hazmat_oos_max: str = Query(None),
+    basic_viol_min: str = Query(None),
+    basic_viol_max: str = Query(None),
+    unsafe_viol_min: str = Query(None),
+    unsafe_viol_max: str = Query(None),
+    fatigued_viol_min: str = Query(None),
+    fatigued_viol_max: str = Query(None),
+    dr_fitness_viol_min: str = Query(None),
+    dr_fitness_viol_max: str = Query(None),
+    subt_alcohol_viol_min: str = Query(None),
+    subt_alcohol_viol_max: str = Query(None),
+    vh_maint_viol_min: str = Query(None),
+    vh_maint_viol_max: str = Query(None),
+    hm_viol_min: str = Query(None),
+    hm_viol_max: str = Query(None),
+    limit: int = Query(None),
+    offset: int = Query(0),
+):
+    """Fetch inspections with optional filters."""
+    filters = {}
+    if dot_number: filters["dot_number"] = dot_number
+    if report_number: filters["report_number"] = report_number
+    if report_state: filters["report_state"] = report_state
+    if insp_date_from: filters["insp_date_from"] = insp_date_from
+    if insp_date_to: filters["insp_date_to"] = insp_date_to
+    if unsafe_insp: filters["unsafe_insp"] = unsafe_insp
+    if fatigued_insp: filters["fatigued_insp"] = fatigued_insp
+    if dr_fitness_insp: filters["dr_fitness_insp"] = dr_fitness_insp
+    if subt_alcohol_insp: filters["subt_alcohol_insp"] = subt_alcohol_insp
+    if vh_maint_insp: filters["vh_maint_insp"] = vh_maint_insp
+    if hm_insp: filters["hm_insp"] = hm_insp
+    
+    if oos_min:
+        try:
+            filters["oos_min"] = int(oos_min)
+        except ValueError:
+            pass
+    if oos_max:
+        try:
+            filters["oos_max"] = int(oos_max)
+        except ValueError:
+            pass
+    if driver_oos_min:
+        try:
+            filters["driver_oos_min"] = int(driver_oos_min)
+        except ValueError:
+            pass
+    if driver_oos_max:
+        try:
+            filters["driver_oos_max"] = int(driver_oos_max)
+        except ValueError:
+            pass
+    if vehicle_oos_min:
+        try:
+            filters["vehicle_oos_min"] = int(vehicle_oos_min)
+        except ValueError:
+            pass
+    if vehicle_oos_max:
+        try:
+            filters["vehicle_oos_max"] = int(vehicle_oos_max)
+        except ValueError:
+            pass
+    if hazmat_oos_min:
+        try:
+            filters["hazmat_oos_min"] = int(hazmat_oos_min)
+        except ValueError:
+            pass
+    if hazmat_oos_max:
+        try:
+            filters["hazmat_oos_max"] = int(hazmat_oos_max)
+        except ValueError:
+            pass
+    
+    if basic_viol_min:
+        try:
+            filters["basic_viol_min"] = int(basic_viol_min)
+        except ValueError:
+            pass
+    if basic_viol_max:
+        try:
+            filters["basic_viol_max"] = int(basic_viol_max)
+        except ValueError:
+            pass
+    if unsafe_viol_min:
+        try:
+            filters["unsafe_viol_min"] = int(unsafe_viol_min)
+        except ValueError:
+            pass
+    if unsafe_viol_max:
+        try:
+            filters["unsafe_viol_max"] = int(unsafe_viol_max)
+        except ValueError:
+            pass
+    if fatigued_viol_min:
+        try:
+            filters["fatigued_viol_min"] = int(fatigued_viol_min)
+        except ValueError:
+            pass
+    if fatigued_viol_max:
+        try:
+            filters["fatigued_viol_max"] = int(fatigued_viol_max)
+        except ValueError:
+            pass
+    if dr_fitness_viol_min:
+        try:
+            filters["dr_fitness_viol_min"] = int(dr_fitness_viol_min)
+        except ValueError:
+            pass
+    if dr_fitness_viol_max:
+        try:
+            filters["dr_fitness_viol_max"] = int(dr_fitness_viol_max)
+        except ValueError:
+            pass
+    if subt_alcohol_viol_min:
+        try:
+            filters["subt_alcohol_viol_min"] = int(subt_alcohol_viol_min)
+        except ValueError:
+            pass
+    if subt_alcohol_viol_max:
+        try:
+            filters["subt_alcohol_viol_max"] = int(subt_alcohol_viol_max)
+        except ValueError:
+            pass
+    if vh_maint_viol_min:
+        try:
+            filters["vh_maint_viol_min"] = int(vh_maint_viol_min)
+        except ValueError:
+            pass
+    if vh_maint_viol_max:
+        try:
+            filters["vh_maint_viol_max"] = int(vh_maint_viol_max)
+        except ValueError:
+            pass
+    if hm_viol_min:
+        try:
+            filters["hm_viol_min"] = float(hm_viol_min)
+        except ValueError:
+            pass
+    if hm_viol_max:
+        try:
+            filters["hm_viol_max"] = float(hm_viol_max)
+        except ValueError:
+            pass
+    
+    if offset > 0: filters["offset"] = offset
+    if limit is not None:
+        filters["limit"] = limit
+    else:
+        filters["limit"] = 500
+    
+    result = await fetch_inspections(filters)
+    return result
+
+@app.get("/api/inspections/count")
+async def api_get_inspections_count():
+    """Get total count of inspections."""
+    count = await get_inspections_count()
+    return {"count": count}
+
+@app.get("/api/inspections/dashboard-stats")
+async def api_get_inspections_dashboard_stats():
+    """Get dashboard statistics for inspections."""
+    stats = await get_inspections_dashboard_stats()
+    return stats
+
+@app.get("/api/inspections/{unique_id}")
+async def api_get_inspection_detail(unique_id: int):
+    """Get details of a single inspection by unique_id."""
+    inspection = await fetch_inspection_by_id(unique_id)
+    if inspection:
+        return inspection
+    return JSONResponse(status_code=404, content={"error": "Inspection not found"})
+
+@app.get("/api/inspections/by-dot/{dot_number}")
+async def api_get_inspections_by_dot(dot_number: int):
+    """Get all inspections for a specific DOT number."""
+    inspections = await fetch_inspections_by_dot(dot_number)
+    return {"success": True, "dot_number": dot_number, "inspections": inspections, "count": len(inspections)}
