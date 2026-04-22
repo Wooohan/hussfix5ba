@@ -2114,3 +2114,349 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching insurance history for {docket_number}: {e}")
         return []
+
+
+# ── Inspections table functions ──────────────────────────────────────────────
+
+def _inspection_row_to_dict(row) -> dict:
+    """Convert a database row from the inspections table to a dictionary."""
+    d = dict(row)
+    return d
+
+async def fetch_inspections(filters: dict) -> dict:
+    """Fetch inspections from the inspections table with optional filters.
+    
+    Supported filters:
+    - dot_number: Filter by DOT number
+    - report_number: Filter by report number
+    - report_state: Filter by report state
+    - insp_date_from: Filter by inspection date (from)
+    - insp_date_to: Filter by inspection date (to)
+    - unsafe_insp: Filter by unsafe inspection (boolean)
+    - fatigued_insp: Filter by fatigued inspection (boolean)
+    - dr_fitness_insp: Filter by driver fitness inspection (boolean)
+    - subt_alcohol_insp: Filter by substance/alcohol inspection (boolean)
+    - vh_maint_insp: Filter by vehicle maintenance inspection (boolean)
+    - hm_insp: Filter by hazmat inspection (boolean)
+    - oos_min/max: Filter by out-of-service violations
+    - driver_oos_min/max: Filter by driver OOS violations
+    - vehicle_oos_min/max: Filter by vehicle OOS violations
+    - hazmat_oos_min/max: Filter by hazmat OOS violations
+    - basic_viol_min/max: Filter by basic violations
+    - unsafe_viol_min/max: Filter by unsafe violations
+    - fatigued_viol_min/max: Filter by fatigued violations
+    - dr_fitness_viol_min/max: Filter by driver fitness violations
+    - subt_alcohol_viol_min/max: Filter by substance/alcohol violations
+    - vh_maint_viol_min/max: Filter by vehicle maintenance violations
+    - hm_viol_min/max: Filter by hazmat violations
+    - limit: Number of results to return (default 500, max 5000)
+    - offset: Offset for pagination (default 0)
+    """
+    pool = get_pool()
+    
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+    
+    # Basic filters
+    if filters.get("dot_number"):
+        dot_val = filters["dot_number"].strip()
+        conditions.append(f"i.dot_number = ${idx}::bigint")
+        params.append(int(dot_val))
+        idx += 1
+    
+    if filters.get("report_number"):
+        conditions.append(f"i.report_number ILIKE ${idx}")
+        params.append(f"%{filters['report_number']}%")
+        idx += 1
+    
+    if filters.get("report_state"):
+        conditions.append(f"i.report_state = ${idx}")
+        params.append(filters["report_state"].upper())
+        idx += 1
+    
+    # Date range filters
+    if filters.get("insp_date_from"):
+        conditions.append(f"i.insp_date >= ${idx}")
+        params.append(filters["insp_date_from"])
+        idx += 1
+    
+    if filters.get("insp_date_to"):
+        conditions.append(f"i.insp_date <= ${idx}")
+        params.append(filters["insp_date_to"])
+        idx += 1
+    
+    # Inspection type filters (boolean flags)
+    if filters.get("unsafe_insp") == "true":
+        conditions.append("i.unsafe_insp = true")
+    elif filters.get("unsafe_insp") == "false":
+        conditions.append("i.unsafe_insp = false")
+    
+    if filters.get("fatigued_insp") == "true":
+        conditions.append("i.fatigued_insp = true")
+    elif filters.get("fatigued_insp") == "false":
+        conditions.append("i.fatigued_insp = false")
+    
+    if filters.get("dr_fitness_insp") == "true":
+        conditions.append("i.dr_fitness_insp = true")
+    elif filters.get("dr_fitness_insp") == "false":
+        conditions.append("i.dr_fitness_insp = false")
+    
+    if filters.get("subt_alcohol_insp") == "true":
+        conditions.append("i.subt_alcohol_insp = true")
+    elif filters.get("subt_alcohol_insp") == "false":
+        conditions.append("i.subt_alcohol_insp = false")
+    
+    if filters.get("vh_maint_insp") == "true":
+        conditions.append("i.vh_maint_insp = true")
+    elif filters.get("vh_maint_insp") == "false":
+        conditions.append("i.vh_maint_insp = false")
+    
+    if filters.get("hm_insp") == "true":
+        conditions.append("i.hm_insp = true")
+    elif filters.get("hm_insp") == "false":
+        conditions.append("i.hm_insp = false")
+    
+    # OOS violations filters
+    if filters.get("oos_min") is not None:
+        conditions.append(f"i.oos_total >= ${idx}")
+        params.append(int(filters["oos_min"]))
+        idx += 1
+    
+    if filters.get("oos_max") is not None:
+        conditions.append(f"i.oos_total <= ${idx}")
+        params.append(int(filters["oos_max"]))
+        idx += 1
+    
+    if filters.get("driver_oos_min") is not None:
+        conditions.append(f"i.driver_oos_total >= ${idx}")
+        params.append(int(filters["driver_oos_min"]))
+        idx += 1
+    
+    if filters.get("driver_oos_max") is not None:
+        conditions.append(f"i.driver_oos_total <= ${idx}")
+        params.append(int(filters["driver_oos_max"]))
+        idx += 1
+    
+    if filters.get("vehicle_oos_min") is not None:
+        conditions.append(f"i.vehicle_oos_total >= ${idx}")
+        params.append(int(filters["vehicle_oos_min"]))
+        idx += 1
+    
+    if filters.get("vehicle_oos_max") is not None:
+        conditions.append(f"i.vehicle_oos_total <= ${idx}")
+        params.append(int(filters["vehicle_oos_max"]))
+        idx += 1
+    
+    if filters.get("hazmat_oos_min") is not None:
+        conditions.append(f"i.hazmat_oos_total >= ${idx}")
+        params.append(int(filters["hazmat_oos_min"]))
+        idx += 1
+    
+    if filters.get("hazmat_oos_max") is not None:
+        conditions.append(f"i.hazmat_oos_total <= ${idx}")
+        params.append(int(filters["hazmat_oos_max"]))
+        idx += 1
+    
+    # Violations filters
+    if filters.get("basic_viol_min") is not None:
+        conditions.append(f"i.basic_viol >= ${idx}")
+        params.append(int(filters["basic_viol_min"]))
+        idx += 1
+    
+    if filters.get("basic_viol_max") is not None:
+        conditions.append(f"i.basic_viol <= ${idx}")
+        params.append(int(filters["basic_viol_max"]))
+        idx += 1
+    
+    if filters.get("unsafe_viol_min") is not None:
+        conditions.append(f"i.unsafe_viol >= ${idx}")
+        params.append(int(filters["unsafe_viol_min"]))
+        idx += 1
+    
+    if filters.get("unsafe_viol_max") is not None:
+        conditions.append(f"i.unsafe_viol <= ${idx}")
+        params.append(int(filters["unsafe_viol_max"]))
+        idx += 1
+    
+    if filters.get("fatigued_viol_min") is not None:
+        conditions.append(f"i.fatigued_viol >= ${idx}")
+        params.append(int(filters["fatigued_viol_min"]))
+        idx += 1
+    
+    if filters.get("fatigued_viol_max") is not None:
+        conditions.append(f"i.fatigued_viol <= ${idx}")
+        params.append(int(filters["fatigued_viol_max"]))
+        idx += 1
+    
+    if filters.get("dr_fitness_viol_min") is not None:
+        conditions.append(f"i.dr_fitness_viol >= ${idx}")
+        params.append(int(filters["dr_fitness_viol_min"]))
+        idx += 1
+    
+    if filters.get("dr_fitness_viol_max") is not None:
+        conditions.append(f"i.dr_fitness_viol <= ${idx}")
+        params.append(int(filters["dr_fitness_viol_max"]))
+        idx += 1
+    
+    if filters.get("subt_alcohol_viol_min") is not None:
+        conditions.append(f"i.subt_alcohol_viol >= ${idx}")
+        params.append(int(filters["subt_alcohol_viol_min"]))
+        idx += 1
+    
+    if filters.get("subt_alcohol_viol_max") is not None:
+        conditions.append(f"i.subt_alcohol_viol <= ${idx}")
+        params.append(int(filters["subt_alcohol_viol_max"]))
+        idx += 1
+    
+    if filters.get("vh_maint_viol_min") is not None:
+        conditions.append(f"i.vh_maint_viol >= ${idx}")
+        params.append(int(filters["vh_maint_viol_min"]))
+        idx += 1
+    
+    if filters.get("vh_maint_viol_max") is not None:
+        conditions.append(f"i.vh_maint_viol <= ${idx}")
+        params.append(int(filters["vh_maint_viol_max"]))
+        idx += 1
+    
+    if filters.get("hm_viol_min") is not None:
+        conditions.append(f"i.hm_viol >= ${idx}")
+        params.append(float(filters["hm_viol_min"]))
+        idx += 1
+    
+    if filters.get("hm_viol_max") is not None:
+        conditions.append(f"i.hm_viol <= ${idx}")
+        params.append(float(filters["hm_viol_max"]))
+        idx += 1
+    
+    # Build WHERE clause
+    where = " AND ".join(conditions) if conditions else "TRUE"
+    
+    limit_val = min(int(filters.get("limit", 500)), 5000)
+    offset_val = int(filters.get("offset", 0))
+    
+    # Select all columns from inspections table
+    _LIST_COLS = """i.unique_id, i.report_number, i.report_state, i.dot_number,
+        i.insp_date, i.insp_level_id, i.county_code_state, i.time_weight,
+        i.driver_oos_total, i.vehicle_oos_total, i.total_hazmat_sent, i.oos_total,
+        i.hazmat_oos_total, i.hazmat_placard_req,
+        i.unit_type_desc, i.unit_make, i.unit_license, i.unit_license_state,
+        i.vin, i.unit_decal_number,
+        i.unit_type_desc2, i.unit_make2, i.unit_license2, i.unit_license_state2,
+        i.vin2, i.unit_decal_number2,
+        i.unsafe_insp, i.fatigued_insp, i.dr_fitness_insp, i.subt_alcohol_insp,
+        i.vh_maint_insp, i.hm_insp,
+        i.basic_viol, i.unsafe_viol, i.fatigued_viol, i.dr_fitness_viol,
+        i.subt_alcohol_viol, i.vh_maint_viol, i.hm_viol"""
+    
+    query = f"""
+        SELECT {_LIST_COLS}
+        FROM inspections i
+        WHERE {where}
+        ORDER BY i.insp_date DESC, i.unique_id DESC
+        LIMIT {limit_val} OFFSET {offset_val}
+    """
+    
+    count_query = f"""
+        SELECT COUNT(*) as cnt
+        FROM inspections i
+        WHERE {where}
+    """
+    
+    try:
+        rows, count_row = await asyncio.gather(
+            pool.fetch(query, *params),
+            pool.fetchrow(count_query, *params),
+        )
+        filtered_count = count_row["cnt"] if count_row else 0
+        
+        inspection_dicts = [_inspection_row_to_dict(row) for row in rows]
+        
+        return {
+            "data": inspection_dicts,
+            "filtered_count": filtered_count,
+        }
+    except Exception as e:
+        print(f"[DB] Error fetching inspections: {e}")
+        return {"data": [], "filtered_count": 0}
+
+async def get_inspections_count() -> int:
+    """Get total count of inspections."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM inspections")
+        return row["cnt"] if row else 0
+    except Exception as e:
+        print(f"[DB] Error getting inspections count: {e}")
+        return 0
+
+async def get_inspections_dashboard_stats() -> dict:
+    """Get dashboard statistics for inspections."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE unsafe_insp = true) AS unsafe_inspections,
+                COUNT(*) FILTER (WHERE fatigued_insp = true) AS fatigued_inspections,
+                COUNT(*) FILTER (WHERE dr_fitness_insp = true) AS dr_fitness_inspections,
+                COUNT(*) FILTER (WHERE subt_alcohol_insp = true) AS substance_alcohol_inspections,
+                COUNT(*) FILTER (WHERE vh_maint_insp = true) AS vehicle_maintenance_inspections,
+                COUNT(*) FILTER (WHERE hm_insp = true) AS hazmat_inspections,
+                COUNT(*) FILTER (WHERE oos_total > 0) AS with_oos_violations,
+                AVG(oos_total) AS avg_oos_violations,
+                AVG(basic_viol) AS avg_basic_violations,
+                SUM(oos_total) AS total_oos_violations
+            FROM inspections
+        """)
+        if not row:
+            return {}
+        result = {
+            "total": row["total"],
+            "unsafeInspections": row["unsafe_inspections"],
+            "fatiguedInspections": row["fatigued_inspections"],
+            "drFitnessInspections": row["dr_fitness_inspections"],
+            "substanceAlcoholInspections": row["substance_alcohol_inspections"],
+            "vehicleMaintenanceInspections": row["vehicle_maintenance_inspections"],
+            "hazmatInspections": row["hazmat_inspections"],
+            "withOosViolations": row["with_oos_violations"],
+            "avgOosViolations": float(row["avg_oos_violations"]) if row["avg_oos_violations"] else 0,
+            "avgBasicViolations": float(row["avg_basic_violations"]) if row["avg_basic_violations"] else 0,
+            "totalOosViolations": row["total_oos_violations"] or 0,
+        }
+        return result
+    except Exception as e:
+        print(f"[DB] Error fetching inspections dashboard stats: {e}")
+        return {}
+
+async def fetch_inspection_by_id(unique_id: int) -> dict | None:
+    """Fetch a single inspection by unique_id."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow(
+            "SELECT * FROM inspections WHERE unique_id = $1",
+            unique_id,
+        )
+        if row:
+            return _inspection_row_to_dict(row)
+        return None
+    except Exception as e:
+        print(f"[DB] Error fetching inspection {unique_id}: {e}")
+        return None
+
+async def fetch_inspections_by_dot(dot_number: int) -> list[dict]:
+    """Fetch all inspections for a specific DOT number."""
+    pool = get_pool()
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT * FROM inspections
+            WHERE dot_number = $1
+            ORDER BY insp_date DESC
+            """,
+            dot_number,
+        )
+        return [_inspection_row_to_dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching inspections for DOT {dot_number}: {e}")
+        return []
