@@ -1057,22 +1057,19 @@ async def fetch_carriers(filters: dict) -> dict:
     # Insurance-related filters – independent CTE-based pre-filtering
     # ------------------------------------------------------------------
     # Each independent insurance condition pre-selects qualifying
-    # dot_numbers (USDOT) from insurance_history via a CTE, then carriers
-    # are filtered with INNER JOINs using LPAD(c.dot_number::text, 8, '0')
-    # to match the zero-padded USDOT in insurance_history.dot_number.
-    # This is dramatically faster than correlated EXISTS on 4M+ carriers
-    # because:
+    # docket_numbers from insurance_history via a CTE, then carriers
+    # are filtered with INNER JOINs using the expression index on
+    # (docket1prefix || docket1).  This is dramatically faster than
+    # correlated EXISTS on 4M+ carriers because:
     #   1. insurance_history is scanned once per filter (not per carrier)
-    #   2. The dot_number index drives the carrier lookup
+    #   2. The expression index drives the carrier lookup
     #   3. Each filter is independent so different insurance_history rows
-    #      can satisfy different filters
+    #      can satisfy different filters (fixes the correctness bug where
+    #      the old consolidated EXISTS required one row to match ALL
+    #      conditions simultaneously).
 
     _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
-    # Use USDOT (dot_number) to match insurance_history instead of docket_number.
-    # insurance_history.dot_number stores zero-padded USDOT (e.g. '03169585')
-    # while carriers.dot_number stores the integer.  We cast carriers.dot_number
-    # to text with LPAD to match the zero-padded format in insurance_history.
-    _IH_DOT_EXPR = "LPAD(c.dot_number::text, 8, '0')"
+    _IH_DOCKET_EXPR = "c.docket1prefix || c.docket1"
     _ACTIVE_POLICY = "(cancl_effective_date IS NULL OR cancl_effective_date = '')"
 
     # CTE parts: list of (cte_name, cte_sql)
@@ -1082,15 +1079,15 @@ async def fetch_carriers(filters: dict) -> dict:
     _cte_idx = 0
 
     def _add_positive_ins_filter(where_body: str):
-        """Register an insurance CTE using dot_number (USDOT) and add an INNER JOIN."""
+        """Register an insurance CTE and add an INNER JOIN for it."""
         nonlocal _cte_idx
         name = f"_ifd{_cte_idx}"
         _cte_parts.append((
             name,
-            f"SELECT DISTINCT dot_number FROM insurance_history WHERE {where_body}",
+            f"SELECT DISTINCT docket_number FROM insurance_history WHERE {where_body}",
         ))
         _ins_joins.append(
-            f"INNER JOIN {name} ON {name}.dot_number = {_IH_DOT_EXPR}"
+            f"INNER JOIN {name} ON {name}.docket_number = {_IH_DOCKET_EXPR}"
         )
         _cte_idx += 1
 
@@ -1128,7 +1125,7 @@ async def fetch_carriers(filters: dict) -> dict:
         elif val == "0":
             conditions.append(
                 f"NOT EXISTS (SELECT 1 FROM insurance_history ih "
-                f"WHERE ih.dot_number = {_IH_DOT_EXPR} "
+                f"WHERE ih.docket_number = {_IH_DOCKET_EXPR} "
                 f"AND ih.ins_type_desc {op} ${idx} "
                 f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
             )
@@ -1396,43 +1393,39 @@ async def fetch_carriers(filters: dict) -> dict:
             )
             filtered_count = count_row["cnt"] if count_row else 0
 
-        # Batch-fetch insurance history for the returned rows using USDOT
+        # Batch-fetch insurance history for the returned rows
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
-
-        # Build USDOT keys (zero-padded to 8 digits to match insurance_history.dot_number)
-        dot_keys = []
+        docket_keys = []
         for row in rows:
             d = dict(row)
-            raw_dot = d.get("dot_number")
-            if raw_dot is not None:
-                dot_keys.append(str(raw_dot).zfill(8))
-            else:
-                dot_keys.append("")
+            pfx = d.get("docket1prefix") or ""
+            num = d.get("docket1") or ""
+            docket_keys.append(f"{pfx}{num}" if pfx and num else "")
 
-        non_empty_dots = [k for k in dot_keys if k]
-        if non_empty_dots:
-            unique_dots = list(set(non_empty_dots))
+        non_empty_keys = [k for k in docket_keys if k]
+        if non_empty_keys:
+            unique_keys = list(set(non_empty_keys))
             ih_rows = await pool.fetch(
                 """
-                SELECT dot_number, docket_number, ins_type_desc, max_cov_amount,
+                SELECT docket_number, ins_type_desc, max_cov_amount,
                        underl_lim_amount, policy_no, effective_date,
                        ins_form_code, name_company, trans_date,
                        cancl_effective_date
                 FROM insurance_history
-                WHERE dot_number = ANY($1)
+                WHERE docket_number = ANY($1)
                 ORDER BY effective_date DESC
                 """,
-                unique_dots,
+                unique_keys,
             )
             ih_map: dict[str, list[dict]] = {}
             for ih_row in ih_rows:
-                dk = ih_row["dot_number"]
+                dk = ih_row["docket_number"]
                 if dk not in ih_map:
                     ih_map[dk] = []
                 ih_map[dk].append(dict(ih_row))
 
             for i, carrier in enumerate(carrier_dicts):
-                dk = dot_keys[i]
+                dk = docket_keys[i]
                 if dk and dk in ih_map:
                     carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
 
