@@ -1429,6 +1429,61 @@ async def fetch_carriers(filters: dict) -> dict:
                 if dk and dk in ih_map:
                     carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
 
+        # Batch-fetch inspections from the new inspections table and attach
+        # them to each carrier by dot_number. The frontend expects
+        # carrier.inspections to be an array.
+        dot_numbers = []
+        for row in rows:
+            d = dict(row)
+            dn = d.get("dot_number")
+            if dn is not None:
+                try:
+                    dot_numbers.append(int(dn))
+                except (TypeError, ValueError):
+                    pass
+
+        if dot_numbers:
+            unique_dots = list(set(dot_numbers))
+            try:
+                insp_rows = await pool.fetch(
+                    """
+                    SELECT *
+                    FROM inspections
+                    WHERE dot_number = ANY($1)
+                    ORDER BY insp_date DESC NULLS LAST
+                    """,
+                    unique_dots,
+                )
+                insp_map: dict[int, list[dict]] = {}
+                for ir in insp_rows:
+                    d = _inspection_row_to_dict(ir)
+                    dn = d.get("dot_number")
+                    if dn is None:
+                        continue
+                    try:
+                        dn_int = int(dn)
+                    except (TypeError, ValueError):
+                        continue
+                    insp_map.setdefault(dn_int, []).append(d)
+
+                for carrier in carrier_dicts:
+                    cdn = carrier.get("dot_number")
+                    try:
+                        cdn_int = int(cdn) if cdn is not None else None
+                    except (TypeError, ValueError):
+                        cdn_int = None
+                    if cdn_int is not None and cdn_int in insp_map:
+                        carrier["inspections"] = insp_map[cdn_int]
+                    else:
+                        carrier["inspections"] = []
+            except Exception as _e:
+                print(f"[DB] Warning: failed to batch-fetch inspections: {_e}")
+                for carrier in carrier_dicts:
+                    carrier.setdefault("inspections", [])
+        else:
+            for carrier in carrier_dicts:
+                carrier.setdefault("inspections", [])
+
         return {
             "data": carrier_dicts,
             "filtered_count": filtered_count,
@@ -2422,7 +2477,7 @@ async def get_inspections_dashboard_stats() -> dict:
             "withOosViolations": row["with_oos_violations"],
             "avgOosViolations": float(row["avg_oos_violations"]) if row["avg_oos_violations"] else 0,
             "avgBasicViolations": float(row["avg_basic_violations"]) if row["avg_basic_violations"] else 0,
-            "totalOosViolations": row["total_oos_violations"] or 0,
+            "totalOosViolations": int(row["total_oos_violations"]) if row["total_oos_violations"] else 0,
         }
         return result
     except Exception as e:
