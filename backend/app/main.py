@@ -33,6 +33,8 @@ from app.database import (
     save_new_venture_entries, fetch_new_ventures, fetch_new_venture_by_id,
     get_new_venture_count, get_new_venture_scraped_dates, delete_new_venture,
     fetch_insurance_history,
+    fetch_inspections, get_inspections_count, get_inspections_dashboard_stats,
+    fetch_inspection_by_id, fetch_inspections_by_dot,
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -810,3 +812,204 @@ async def api_delete_new_venture(record_id: str, request: Request):
 async def api_get_insurance_history(docket_number: str):
     policies = await fetch_insurance_history(docket_number)
     return {"success": True, "docket_number": docket_number, "policies": policies, "count": len(policies)}
+
+# ── Inspections API endpoints ────────────────────────────────────────────────
+
+@app.get("/api/inspections")
+async def api_fetch_inspections(
+    dot_number: str = Query(None),
+    report_number: str = Query(None),
+    report_state: str = Query(None),
+    insp_date_from: str = Query(None),
+    insp_date_to: str = Query(None),
+    unsafe_insp: str = Query(None),
+    fatigued_insp: str = Query(None),
+    dr_fitness_insp: str = Query(None),
+    subt_alcohol_insp: str = Query(None),
+    vh_maint_insp: str = Query(None),
+    hm_insp: str = Query(None),
+    oos_min: str = Query(None),
+    oos_max: str = Query(None),
+    driver_oos_min: str = Query(None),
+    driver_oos_max: str = Query(None),
+    vehicle_oos_min: str = Query(None),
+    vehicle_oos_max: str = Query(None),
+    hazmat_oos_min: str = Query(None),
+    hazmat_oos_max: str = Query(None),
+    basic_viol_min: str = Query(None),
+    basic_viol_max: str = Query(None),
+    unsafe_viol_min: str = Query(None),
+    unsafe_viol_max: str = Query(None),
+    fatigued_viol_min: str = Query(None),
+    fatigued_viol_max: str = Query(None),
+    dr_fitness_viol_min: str = Query(None),
+    dr_fitness_viol_max: str = Query(None),
+    subt_alcohol_viol_min: str = Query(None),
+    subt_alcohol_viol_max: str = Query(None),
+    vh_maint_viol_min: str = Query(None),
+    vh_maint_viol_max: str = Query(None),
+    hm_viol_min: str = Query(None),
+    hm_viol_max: str = Query(None),
+    limit: int = Query(None),
+    offset: int = Query(0),
+):
+    """Fetch inspections with optional filters."""
+    filters = {}
+    if dot_number: filters["dot_number"] = dot_number
+    if report_number: filters["report_number"] = report_number
+    if report_state: filters["report_state"] = report_state
+    if insp_date_from: filters["insp_date_from"] = insp_date_from
+    if insp_date_to: filters["insp_date_to"] = insp_date_to
+    if unsafe_insp: filters["unsafe_insp"] = unsafe_insp
+    if fatigued_insp: filters["fatigued_insp"] = fatigued_insp
+    if dr_fitness_insp: filters["dr_fitness_insp"] = dr_fitness_insp
+    if subt_alcohol_insp: filters["subt_alcohol_insp"] = subt_alcohol_insp
+    if vh_maint_insp: filters["vh_maint_insp"] = vh_maint_insp
+    if hm_insp: filters["hm_insp"] = hm_insp
+    
+    if oos_min:
+        try:
+            filters["oos_min"] = int(oos_min)
+        except ValueError:
+            pass
+    if oos_max:
+        try:
+            filters["oos_max"] = int(oos_max)
+        except ValueError:
+            pass
+    if driver_oos_min:
+        try:
+            filters["driver_oos_min"] = int(driver_oos_min)
+        except ValueError:
+            pass
+    if driver_oos_max:
+        try:
+            filters["driver_oos_max"] = int(driver_oos_max)
+        except ValueError:
+            pass
+    if vehicle_oos_min:
+        try:
+            filters["vehicle_oos_min"] = int(vehicle_oos_min)
+        except ValueError:
+            pass
+    if vehicle_oos_max:
+        try:
+            filters["vehicle_oos_max"] = int(vehicle_oos_max)
+        except ValueError:
+            pass
+    if hazmat_oos_min:
+        try:
+            filters["hazmat_oos_min"] = int(hazmat_oos_min)
+        except ValueError:
+            pass
+    if hazmat_oos_max:
+        try:
+            filters["hazmat_oos_max"] = int(hazmat_oos_max)
+        except ValueError:
+            pass
+    
+    if basic_viol_min:
+        try:
+            filters["basic_viol_min"] = int(basic_viol_min)
+        except ValueError:
+            pass
+    if basic_viol_max:
+        try:
+            filters["basic_viol_max"] = int(basic_viol_max)
+        except ValueError:
+            pass
+    if unsafe_viol_min:
+        try:
+            filters["unsafe_viol_min"] = int(unsafe_viol_min)
+        except ValueError:
+            pass
+    if unsafe_viol_max:
+        try:
+            filters["unsafe_viol_max"] = int(unsafe_viol_max)
+        except ValueError:
+            pass
+    if fatigued_viol_min:
+        try:
+            filters["fatigued_viol_min"] = int(fatigued_viol_min)
+        except ValueError:
+            pass
+    if fatigued_viol_max:
+        try:
+            filters["fatigued_viol_max"] = int(fatigued_viol_max)
+        except ValueError:
+            pass
+    if dr_fitness_viol_min:
+        try:
+            filters["dr_fitness_viol_min"] = int(dr_fitness_viol_min)
+        except ValueError:
+            pass
+    if dr_fitness_viol_max:
+        try:
+            filters["dr_fitness_viol_max"] = int(dr_fitness_viol_max)
+        except ValueError:
+            pass
+    if subt_alcohol_viol_min:
+        try:
+            filters["subt_alcohol_viol_min"] = int(subt_alcohol_viol_min)
+        except ValueError:
+            pass
+    if subt_alcohol_viol_max:
+        try:
+            filters["subt_alcohol_viol_max"] = int(subt_alcohol_viol_max)
+        except ValueError:
+            pass
+    if vh_maint_viol_min:
+        try:
+            filters["vh_maint_viol_min"] = int(vh_maint_viol_min)
+        except ValueError:
+            pass
+    if vh_maint_viol_max:
+        try:
+            filters["vh_maint_viol_max"] = int(vh_maint_viol_max)
+        except ValueError:
+            pass
+    if hm_viol_min:
+        try:
+            filters["hm_viol_min"] = float(hm_viol_min)
+        except ValueError:
+            pass
+    if hm_viol_max:
+        try:
+            filters["hm_viol_max"] = float(hm_viol_max)
+        except ValueError:
+            pass
+    
+    if offset > 0: filters["offset"] = offset
+    if limit is not None:
+        filters["limit"] = limit
+    else:
+        filters["limit"] = 500
+    
+    result = await fetch_inspections(filters)
+    return result
+
+@app.get("/api/inspections/count")
+async def api_get_inspections_count():
+    """Get total count of inspections."""
+    count = await get_inspections_count()
+    return {"count": count}
+
+@app.get("/api/inspections/dashboard-stats")
+async def api_get_inspections_dashboard_stats():
+    """Get dashboard statistics for inspections."""
+    stats = await get_inspections_dashboard_stats()
+    return stats
+
+@app.get("/api/inspections/{unique_id}")
+async def api_get_inspection_detail(unique_id: int):
+    """Get details of a single inspection by unique_id."""
+    inspection = await fetch_inspection_by_id(unique_id)
+    if inspection:
+        return inspection
+    return JSONResponse(status_code=404, content={"error": "Inspection not found"})
+
+@app.get("/api/inspections/by-dot/{dot_number}")
+async def api_get_inspections_by_dot(dot_number: int):
+    """Get all inspections for a specific DOT number."""
+    inspections = await fetch_inspections_by_dot(dot_number)
+    return {"success": True, "dot_number": dot_number, "inspections": inspections, "count": len(inspections)}
