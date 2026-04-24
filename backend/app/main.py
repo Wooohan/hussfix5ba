@@ -37,6 +37,7 @@ from app.database import (
     fetch_inspection_by_id, fetch_inspections_by_dot,
     fetch_crashes, get_crashes_count, get_crashes_dashboard_stats,
     fetch_crash_by_report, fetch_crashes_by_dot,
+    fetch_safety_by_dot,
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -1103,3 +1104,17 @@ async def api_get_crash_detail(report_number: str):
     if crash:
         return crash
     return JSONResponse(status_code=404, content={"error": "Crash not found"})
+
+
+@app.get("/api/safety/{dot_number}")
+async def api_get_safety(dot_number: str):
+    """Fetch safety data for a carrier from the safety table.
+
+    Returns BASIC scores, OOS rates (driver & vehicle), and inspection totals.
+    Driver OOS rate = driver_oos_insp_total / driver_insp_total * 100
+    Vehicle OOS rate = vehicle_oos_insp_total / vehicle_insp_total * 100
+    """
+    data = await fetch_safety_by_dot(dot_number)
+    if data:
+        return data
+    return JSONResponse(status_code=404, content={"error": "No safety data found for this carrier"})
