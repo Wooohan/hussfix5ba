@@ -6,6 +6,8 @@ import time as _time
 import asyncpg
 from typing import Optional
 
+from app.cache import cache_get, cache_set, cache_delete, cache_delete_pattern
+
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
     import warnings
@@ -1733,11 +1735,18 @@ async def get_carrier_count() -> int:
     return row["cnt"] if row else 0
 
 async def get_carrier_dashboard_stats() -> dict:
-    """Dashboard statistics for Census data (cached for 5 minutes)."""
+    """Dashboard statistics for Census data (cached in-memory 5 min + Redis)."""
     global _dashboard_cache, _dashboard_cache_ts
     now = _time.time()
     if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
         return _dashboard_cache
+
+    # Try Redis before hitting DB
+    redis_cached = await cache_get("dashboard:carrier_stats")
+    if redis_cached:
+        _dashboard_cache = redis_cached
+        _dashboard_cache_ts = now
+        return redis_cached
 
     pool = get_pool()
     try:
@@ -1772,6 +1781,7 @@ async def get_carrier_dashboard_stats() -> dict:
         }
         _dashboard_cache = result
         _dashboard_cache_ts = now
+        await cache_set("dashboard:carrier_stats", result, ttl=900)
         return result
     except Exception as e:
         print(f"[DB] Error fetching dashboard stats: {e}")
@@ -2776,16 +2786,24 @@ async def fetch_inspections(filters: dict) -> dict:
 
 async def get_inspections_count() -> int:
     """Get total count of inspections."""
+    cached = await cache_get("count:inspections")
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM inspections")
-        return row["cnt"] if row else 0
+        val = row["cnt"] if row else 0
+        await cache_set("count:inspections", val, ttl=900)
+        return val
     except Exception as e:
         print(f"[DB] Error getting inspections count: {e}")
         return 0
 
 async def get_inspections_dashboard_stats() -> dict:
     """Get dashboard statistics for inspections."""
+    cached = await cache_get("dashboard:inspections")
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -2818,6 +2836,7 @@ async def get_inspections_dashboard_stats() -> dict:
             "avgBasicViolations": float(row["avg_basic_violations"]) if row["avg_basic_violations"] else 0,
             "totalOosViolations": int(row["total_oos_violations"]) if row["total_oos_violations"] else 0,
         }
+        await cache_set("dashboard:inspections", result, ttl=900)
         return result
     except Exception as e:
         print(f"[DB] Error fetching inspections dashboard stats: {e}")
@@ -2991,10 +3010,15 @@ async def fetch_crashes(filters: dict) -> dict:
 
 async def get_crashes_count() -> int:
     """Get total count of crashes."""
+    cached = await cache_get("count:crashes")
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM crashes")
-        return row["cnt"] if row else 0
+        val = row["cnt"] if row else 0
+        await cache_set("count:crashes", val, ttl=900)
+        return val
     except Exception as e:
         print(f"[DB] Error getting crashes count: {e}")
         return 0
@@ -3002,6 +3026,9 @@ async def get_crashes_count() -> int:
 
 async def get_crashes_dashboard_stats() -> dict:
     """Get dashboard statistics for crashes."""
+    cached = await cache_get("dashboard:crashes")
+    if cached is not None:
+        return cached
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -3017,7 +3044,7 @@ async def get_crashes_dashboard_stats() -> dict:
         """)
         if not row:
             return {}
-        return {
+        result = {
             "total": row["total"],
             "totalFatalities": int(row["total_fatalities"] or 0),
             "totalInjuries": int(row["total_injuries"] or 0),
@@ -3026,6 +3053,8 @@ async def get_crashes_dashboard_stats() -> dict:
             "totalNotPreventable": row["total_not_preventable"],
             "uniqueCarriers": row["unique_carriers"],
         }
+        await cache_set("dashboard:crashes", result, ttl=900)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching crashes dashboard stats: {e}")
         return {}
@@ -3071,6 +3100,11 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
     Returns a dict with BASIC scores, OOS rates, and inspection totals,
     or None if no record exists.
     """
+    cache_key = f"safety:{dot_number.strip()}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     pool = get_pool()
     try:
         dot_int = int(dot_number.strip())
@@ -3111,7 +3145,7 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
                 "alert": (d.get(f"{key}_ac") or "").strip(),
             })
 
-        return {
+        result = {
             "dot_number": str(d.get("dot_number", "")),
             "type": (d.get("type") or "").strip(),
             "insp_total": d.get("insp_total") or 0,
@@ -3127,6 +3161,8 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
             ],
             "basic_scores": basic_scores,
         }
+        await cache_set(cache_key, result)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching safety for DOT {dot_number}: {e}")
         return None
