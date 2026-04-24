@@ -415,6 +415,11 @@ CREATE TRIGGER update_new_ventures_updated_at BEFORE UPDATE ON new_ventures
 INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extracted_today, ip_address, is_online, is_blocked)
 VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
 ON CONFLICT (email) DO NOTHING;
+
+-- ── Performance indexes for inspections & crashes tables ────────────────────
+CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
+CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 """
 
 async def connect_db() -> None:
@@ -2800,4 +2805,213 @@ async def fetch_inspections_by_dot(dot_number: int) -> list[dict]:
         return [_inspection_row_to_dict(row) for row in rows]
     except Exception as e:
         print(f"[DB] Error fetching inspections for DOT {dot_number}: {e}")
+        return []
+
+
+# ── Crashes ──────────────────────────────────────────────────────────────────
+
+async def fetch_crashes(filters: dict) -> dict:
+    """Fetch crashes from the crashes table with optional filters.
+
+    Supported filters:
+    - dot_number: Filter by DOT number
+    - report_number: Filter by report number
+    - report_state: Filter by report state
+    - report_date_from / report_date_to: Date range
+    - fatalities_min / fatalities_max: Fatalities range
+    - injuries_min / injuries_max: Injuries range
+    - tow_away: Filter by tow_away (true/false)
+    - not_preventable: Filter by not_preventable (true/false)
+    - weather_condition_desc: Filter by weather condition
+    - vehicle_id_number: Filter by VIN
+    - limit / offset: Pagination
+    """
+    pool = get_pool()
+
+    conditions: list[str] = []
+    params: list = []
+    idx = 1
+
+    if filters.get("dot_number"):
+        dot_val = filters["dot_number"].strip()
+        conditions.append(f"dot_number = ${idx}")
+        params.append(dot_val)
+        idx += 1
+
+    if filters.get("report_number"):
+        conditions.append(f"report_number ILIKE ${idx}")
+        params.append(f"%{filters['report_number']}%")
+        idx += 1
+
+    if filters.get("report_state"):
+        conditions.append(f"report_state = ${idx}")
+        params.append(filters["report_state"].upper())
+        idx += 1
+
+    if filters.get("report_date_from"):
+        conditions.append(f"report_date >= ${idx}::date")
+        params.append(filters["report_date_from"])
+        idx += 1
+
+    if filters.get("report_date_to"):
+        conditions.append(f"report_date <= ${idx}::date")
+        params.append(filters["report_date_to"])
+        idx += 1
+
+    if filters.get("fatalities_min") is not None:
+        conditions.append(f"fatalities >= ${idx}")
+        params.append(int(filters["fatalities_min"]))
+        idx += 1
+
+    if filters.get("fatalities_max") is not None:
+        conditions.append(f"fatalities <= ${idx}")
+        params.append(int(filters["fatalities_max"]))
+        idx += 1
+
+    if filters.get("injuries_min") is not None:
+        conditions.append(f"injuries >= ${idx}")
+        params.append(int(filters["injuries_min"]))
+        idx += 1
+
+    if filters.get("injuries_max") is not None:
+        conditions.append(f"injuries <= ${idx}")
+        params.append(int(filters["injuries_max"]))
+        idx += 1
+
+    if filters.get("tow_away") == "true":
+        conditions.append("tow_away = true")
+    elif filters.get("tow_away") == "false":
+        conditions.append("tow_away = false")
+
+    if filters.get("not_preventable") == "true":
+        conditions.append("not_preventable = true")
+    elif filters.get("not_preventable") == "false":
+        conditions.append("not_preventable = false")
+
+    if filters.get("weather_condition_desc"):
+        conditions.append(f"weather_condition_desc ILIKE ${idx}")
+        params.append(f"%{filters['weather_condition_desc']}%")
+        idx += 1
+
+    if filters.get("vehicle_id_number"):
+        conditions.append(f"vehicle_id_number ILIKE ${idx}")
+        params.append(f"%{filters['vehicle_id_number']}%")
+        idx += 1
+
+    where = " AND ".join(conditions) if conditions else "TRUE"
+
+    limit_val = min(int(filters.get("limit", 500)), 5000)
+    offset_val = int(filters.get("offset", 0))
+
+    query = f"""
+        SELECT report_number, report_seq_no, dot_number, report_date,
+            report_state, fatalities, injuries, tow_away, hazmat_released,
+            trafficway_desc, access_control_desc, road_surface_condition_desc,
+            weather_condition_desc, light_condition_desc,
+            vehicle_id_number, vehicle_license_number, vehicle_license_state,
+            severity_weight, time_weight, citation_issued_desc,
+            seq_num, not_preventable
+        FROM crashes
+        WHERE {where}
+        ORDER BY report_date DESC NULLS LAST
+        LIMIT {limit_val} OFFSET {offset_val}
+    """
+
+    count_query = f"""
+        SELECT COUNT(*) as cnt
+        FROM crashes
+        WHERE {where}
+    """
+
+    try:
+        rows, count_row = await asyncio.gather(
+            pool.fetch(query, *params),
+            pool.fetchrow(count_query, *params),
+        )
+        filtered_count = count_row["cnt"] if count_row else 0
+
+        crash_dicts = [_crash_row_to_dict(row) for row in rows]
+
+        return {
+            "data": crash_dicts,
+            "filtered_count": filtered_count,
+        }
+    except Exception as e:
+        print(f"[DB] Error fetching crashes: {e}")
+        return {"data": [], "filtered_count": 0}
+
+
+async def get_crashes_count() -> int:
+    """Get total count of crashes."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("SELECT COUNT(*) as cnt FROM crashes")
+        return row["cnt"] if row else 0
+    except Exception as e:
+        print(f"[DB] Error getting crashes count: {e}")
+        return 0
+
+
+async def get_crashes_dashboard_stats() -> dict:
+    """Get dashboard statistics for crashes."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(fatalities) AS total_fatalities,
+                SUM(injuries) AS total_injuries,
+                COUNT(*) FILTER (WHERE tow_away = true) AS total_towaway,
+                COUNT(*) FILTER (WHERE hazmat_released = true) AS total_hazmat_released,
+                COUNT(*) FILTER (WHERE not_preventable = true) AS total_not_preventable,
+                COUNT(DISTINCT dot_number) AS unique_carriers
+            FROM crashes
+        """)
+        if not row:
+            return {}
+        return {
+            "total": row["total"],
+            "totalFatalities": int(row["total_fatalities"] or 0),
+            "totalInjuries": int(row["total_injuries"] or 0),
+            "totalTowaway": row["total_towaway"],
+            "totalHazmatReleased": row["total_hazmat_released"],
+            "totalNotPreventable": row["total_not_preventable"],
+            "uniqueCarriers": row["unique_carriers"],
+        }
+    except Exception as e:
+        print(f"[DB] Error fetching crashes dashboard stats: {e}")
+        return {}
+
+
+async def fetch_crash_by_report(report_number: str) -> dict | None:
+    """Fetch a single crash by report_number."""
+    pool = get_pool()
+    try:
+        row = await pool.fetchrow(
+            "SELECT * FROM crashes WHERE report_number = $1",
+            report_number,
+        )
+        if row:
+            return _crash_row_to_dict(row)
+        return None
+    except Exception as e:
+        print(f"[DB] Error fetching crash {report_number}: {e}")
+        return None
+
+
+async def fetch_crashes_by_dot(dot_number: str) -> list[dict]:
+    """Fetch all crashes for a specific DOT number."""
+    pool = get_pool()
+    try:
+        rows = await pool.fetch(
+            """
+            SELECT * FROM crashes
+            WHERE dot_number = $1
+            ORDER BY report_date DESC
+            """,
+            dot_number.strip(),
+        )
+        return [_crash_row_to_dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DB] Error fetching crashes for DOT {dot_number}: {e}")
         return []
