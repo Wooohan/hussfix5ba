@@ -420,6 +420,7 @@ ON CONFLICT (email) DO NOTHING;
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_bigint ON carriers ((dot_number::bigint)) WHERE dot_number ~ '^[0-9]+$';
 """
 
 async def connect_db() -> None:
@@ -1504,24 +1505,60 @@ async def fetch_carriers(filters: dict) -> dict:
         FROM pg_class WHERE relname = 'carriers'
     """
 
+    # Safety/inspection/crash CTEs join text ↔ bigint dot_number columns.
+    # Postgres mis-estimates the CTE cardinality and picks a nested-loop
+    # plan that is ~200× slower.  Disabling nested loops forces a hash
+    # join which finishes in < 1 s.
+    _needs_nestloop_off = bool(_cte_parts)
+
+    async def _run_query(conn):
+        """Run the main + count queries, optionally inside a txn."""
+        if _needs_nestloop_off:
+            await conn.execute("SET LOCAL enable_nestloop = off")
+        return await conn.fetch(query, *params)
+
+    async def _run_count(conn):
+        count_q = f"""{cte_prefix}
+            SELECT COUNT(*) as cnt
+            FROM {from_clause}
+            WHERE {where}
+        """
+        if _needs_nestloop_off:
+            await conn.execute("SET LOCAL enable_nestloop = off")
+        return await conn.fetchrow(count_q, *params)
+
     try:
         use_fast_count = not is_filtered
         if use_fast_count:
-            rows, count_row = await asyncio.gather(
-                pool.fetch(query, *params),
-                pool.fetchrow(fast_count_query),
-            )
+            if _needs_nestloop_off:
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        rows = await _run_query(conn)
+                count_row = await pool.fetchrow(fast_count_query)
+            else:
+                rows, count_row = await asyncio.gather(
+                    pool.fetch(query, *params),
+                    pool.fetchrow(fast_count_query),
+                )
             filtered_count = count_row["cnt"] if count_row else 0
         else:
-            count_query = f"""{cte_prefix}
-                SELECT COUNT(*) as cnt
-                FROM {from_clause}
-                WHERE {where}
-            """
-            rows, count_row = await asyncio.gather(
-                pool.fetch(query, *params),
-                pool.fetchrow(count_query, *params),
-            )
+            if _needs_nestloop_off:
+                async with pool.acquire() as c1, pool.acquire() as c2:
+                    async with c1.transaction(), c2.transaction():
+                        rows, count_row = await asyncio.gather(
+                            _run_query(c1),
+                            _run_count(c2),
+                        )
+            else:
+                count_query = f"""{cte_prefix}
+                    SELECT COUNT(*) as cnt
+                    FROM {from_clause}
+                    WHERE {where}
+                """
+                rows, count_row = await asyncio.gather(
+                    pool.fetch(query, *params),
+                    pool.fetchrow(count_query, *params),
+                )
             filtered_count = count_row["cnt"] if count_row else 0
 
         # Batch-fetch insurance history for the returned rows
