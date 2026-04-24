@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import asyncio
 import time as _time
 import asyncpg
@@ -2406,6 +2407,8 @@ def _inspection_row_to_dict(row) -> dict:
     subt_alcohol_viol = int(d.get("subt_alcohol_viol") or 0)
     vh_maint_viol = int(d.get("vh_maint_viol") or 0)
     hm_viol_raw = d.get("hm_viol")
+    if hm_viol_raw is not None and isinstance(hm_viol_raw, float) and math.isnan(hm_viol_raw):
+        hm_viol_raw = None
     hm_viol = int(hm_viol_raw) if hm_viol_raw is not None else 0
 
     total_violations = basic_viol + unsafe_viol + fatigued_viol + dr_fitness_viol + subt_alcohol_viol + vh_maint_viol + hm_viol
@@ -2946,7 +2949,7 @@ async def fetch_crashes(filters: dict) -> dict:
             trafficway_desc, access_control_desc, road_surface_condition_desc,
             weather_condition_desc, light_condition_desc,
             vehicle_id_number, vehicle_license_number, vehicle_license_state,
-            severity_weight, time_weight, citation_issued_desc,
+            citation_issued_desc,
             seq_num, not_preventable
         FROM crashes
         WHERE {where}
