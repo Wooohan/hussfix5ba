@@ -933,8 +933,8 @@ async def fetch_carriers(filters: dict) -> dict:
 
     if filters.get("dot_number"):
         dot_val = filters["dot_number"].strip()
-        conditions.append(f"c.dot_number = ${idx}::bigint")
-        params.append(int(dot_val))
+        conditions.append(f"c.dot_number = ${idx}")
+        params.append(dot_val)
         idx += 1
 
     if filters.get("legal_name"):
@@ -1053,6 +1053,138 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(filters["drivers_max"])
         idx += 1
 
+    # CTE parts: list of (cte_name, cte_sql)
+    _cte_parts: list[tuple[str, str]] = []
+    # JOIN clauses for positive filters (safety + insurance)
+    _ins_joins: list[str] = []
+    _cte_idx = 0
+
+    # ------------------------------------------------------------------
+    # Safety filters – inspections & crashes tables
+    # ------------------------------------------------------------------
+    # These filters use CTE-based pre-filtering against the inspections
+    # and crashes tables, joining back to carriers via dot_number.
+
+    # OOS violations (from inspections table: sum of oos_total per carrier)
+    _oos_conds: list[str] = []
+    if filters.get("oos_min"):
+        _oos_conds.append(f"SUM(oos_total) >= ${idx}")
+        params.append(int(filters["oos_min"]))
+        idx += 1
+    if filters.get("oos_max"):
+        _oos_conds.append(f"SUM(oos_total) <= ${idx}")
+        params.append(int(filters["oos_max"]))
+        idx += 1
+    if _oos_conds:
+        _cte_parts.append((
+            "_oos_filter",
+            f"SELECT dot_number::text AS dot_number FROM inspections "
+            f"GROUP BY dot_number HAVING {' AND '.join(_oos_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _oos_filter ON _oos_filter.dot_number = c.dot_number"
+        )
+
+    # Inspections count filter (from inspections table)
+    _insp_count_conds: list[str] = []
+    if filters.get("inspections_min"):
+        _insp_count_conds.append(f"COUNT(*) >= ${idx}")
+        params.append(int(filters["inspections_min"]))
+        idx += 1
+    if filters.get("inspections_max"):
+        _insp_count_conds.append(f"COUNT(*) <= ${idx}")
+        params.append(int(filters["inspections_max"]))
+        idx += 1
+    if _insp_count_conds:
+        _cte_parts.append((
+            "_insp_count_filter",
+            f"SELECT dot_number::text AS dot_number FROM inspections "
+            f"GROUP BY dot_number HAVING {' AND '.join(_insp_count_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _insp_count_filter ON _insp_count_filter.dot_number = c.dot_number"
+        )
+
+    # Crashes count filter (from crashes table)
+    _crash_count_conds: list[str] = []
+    if filters.get("crashes_min"):
+        _crash_count_conds.append(f"COUNT(*) >= ${idx}")
+        params.append(int(filters["crashes_min"]))
+        idx += 1
+    if filters.get("crashes_max"):
+        _crash_count_conds.append(f"COUNT(*) <= ${idx}")
+        params.append(int(filters["crashes_max"]))
+        idx += 1
+    if _crash_count_conds:
+        _cte_parts.append((
+            "_crash_count_filter",
+            f"SELECT dot_number FROM crashes "
+            f"GROUP BY dot_number HAVING {' AND '.join(_crash_count_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number"
+        )
+
+    # Injuries filter (from crashes table: sum of injuries per carrier)
+    _injuries_conds: list[str] = []
+    if filters.get("injuries_min"):
+        _injuries_conds.append(f"SUM(injuries) >= ${idx}")
+        params.append(int(filters["injuries_min"]))
+        idx += 1
+    if filters.get("injuries_max"):
+        _injuries_conds.append(f"SUM(injuries) <= ${idx}")
+        params.append(int(filters["injuries_max"]))
+        idx += 1
+    if _injuries_conds:
+        _cte_parts.append((
+            "_injuries_filter",
+            f"SELECT dot_number FROM crashes "
+            f"GROUP BY dot_number HAVING {' AND '.join(_injuries_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number"
+        )
+
+    # Fatalities filter (from crashes table: sum of fatalities per carrier)
+    _fatalities_conds: list[str] = []
+    if filters.get("fatalities_min"):
+        _fatalities_conds.append(f"SUM(fatalities) >= ${idx}")
+        params.append(int(filters["fatalities_min"]))
+        idx += 1
+    if filters.get("fatalities_max"):
+        _fatalities_conds.append(f"SUM(fatalities) <= ${idx}")
+        params.append(int(filters["fatalities_max"]))
+        idx += 1
+    if _fatalities_conds:
+        _cte_parts.append((
+            "_fatalities_filter",
+            f"SELECT dot_number FROM crashes "
+            f"GROUP BY dot_number HAVING {' AND '.join(_fatalities_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number"
+        )
+
+    # Towaway filter (from crashes table: count of tow_away=true per carrier)
+    _toway_conds: list[str] = []
+    if filters.get("toway_min"):
+        _toway_conds.append(f"COUNT(*) FILTER (WHERE tow_away = true) >= ${idx}")
+        params.append(int(filters["toway_min"]))
+        idx += 1
+    if filters.get("toway_max"):
+        _toway_conds.append(f"COUNT(*) FILTER (WHERE tow_away = true) <= ${idx}")
+        params.append(int(filters["toway_max"]))
+        idx += 1
+    if _toway_conds:
+        _cte_parts.append((
+            "_toway_filter",
+            f"SELECT dot_number FROM crashes "
+            f"GROUP BY dot_number HAVING {' AND '.join(_toway_conds)}",
+        ))
+        _ins_joins.append(
+            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number"
+        )
+
     # ------------------------------------------------------------------
     # Insurance-related filters – independent CTE-based pre-filtering
     # ------------------------------------------------------------------
@@ -1071,12 +1203,6 @@ async def fetch_carriers(filters: dict) -> dict:
     _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
     _IH_DOCKET_EXPR = "c.docket1prefix || c.docket1"
     _ACTIVE_POLICY = "(cancl_effective_date IS NULL OR cancl_effective_date = '')"
-
-    # CTE parts: list of (cte_name, cte_sql)
-    _cte_parts: list[tuple[str, str]] = []
-    # JOIN clauses for positive insurance filters
-    _ins_joins: list[str] = []
-    _cte_idx = 0
 
     def _add_positive_ins_filter(where_body: str):
         """Register an insurance CTE and add an INNER JOIN for it."""
@@ -1484,6 +1610,48 @@ async def fetch_carriers(filters: dict) -> dict:
             for carrier in carrier_dicts:
                 carrier.setdefault("inspections", [])
 
+        # Batch-fetch crashes from the crashes table and attach to carriers
+        dot_str_numbers = []
+        for row in rows:
+            d = dict(row)
+            dn = d.get("dot_number")
+            if dn is not None and str(dn).strip():
+                dot_str_numbers.append(str(dn).strip())
+
+        if dot_str_numbers:
+            unique_dot_strs = list(set(dot_str_numbers))
+            try:
+                crash_rows = await pool.fetch(
+                    """
+                    SELECT *
+                    FROM crashes
+                    WHERE dot_number = ANY($1)
+                    ORDER BY report_date DESC NULLS LAST
+                    """,
+                    unique_dot_strs,
+                )
+                crash_map: dict[str, list[dict]] = {}
+                for cr in crash_rows:
+                    d = _crash_row_to_dict(cr)
+                    dn = d.get("dot_number", "")
+                    if dn:
+                        crash_map.setdefault(str(dn).strip(), []).append(d)
+
+                for carrier in carrier_dicts:
+                    cdn = carrier.get("dot_number")
+                    cdn_str = str(cdn).strip() if cdn is not None else ""
+                    if cdn_str and cdn_str in crash_map:
+                        carrier["crashes"] = crash_map[cdn_str]
+                    else:
+                        carrier["crashes"] = []
+            except Exception as _e:
+                print(f"[DB] Warning: failed to batch-fetch crashes: {_e}")
+                for carrier in carrier_dicts:
+                    carrier.setdefault("crashes", [])
+        else:
+            for carrier in carrier_dicts:
+                carrier.setdefault("crashes", [])
+
         return {
             "data": carrier_dicts,
             "filtered_count": filtered_count,
@@ -1498,7 +1666,7 @@ async def delete_carrier(dot_number: str) -> bool:
     try:
         result = await pool.execute(
             "DELETE FROM carriers WHERE dot_number = $1",
-            int(dot_number),
+            dot_number.strip(),
         )
         return not result.endswith("0")
     except Exception as e:
@@ -1522,17 +1690,21 @@ async def get_carrier_dashboard_stats() -> dict:
 
     pool = get_pool()
     try:
-        row = await pool.fetchrow("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status_code = 'A') AS active,
-                COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
-                COUNT(*) FILTER (WHERE hm_ind = 'Y') AS hazmat,
-                COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
-                COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
-                COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm
-            FROM carriers
-        """)
+        row, insp_row, crash_row = await asyncio.gather(
+            pool.fetchrow("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE status_code = 'A') AS active,
+                    COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
+                    COUNT(*) FILTER (WHERE hm_ind = 'Y') AS hazmat,
+                    COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
+                    COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
+                    COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm
+                FROM carriers
+            """),
+            pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM inspections"),
+            pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM crashes"),
+        )
         if not row:
             return {}
         result = {
@@ -1544,6 +1716,8 @@ async def get_carrier_dashboard_stats() -> dict:
             "interstate": row["interstate"],
             "intrastate_hm": row["intrastate_hm"],
             "intrastate_non_hm": row["intrastate_non_hm"],
+            "with_inspections": insp_row["cnt"] if insp_row else 0,
+            "with_crashes": crash_row["cnt"] if crash_row else 0,
         }
         _dashboard_cache = result
         _dashboard_cache_ts = now
@@ -1565,7 +1739,7 @@ async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
             """,
             safety_data.get("safety_rating"),
             safety_data.get("safety_rating_date"),
-            int(dot_number),
+            dot_number.strip(),
         )
         return not result.endswith("0")
     except Exception as e:
@@ -2279,6 +2453,16 @@ def _inspection_row_to_dict(row) -> dict:
         "hm_viol": hm_viol_raw,
     }
     return result
+
+
+def _crash_row_to_dict(row) -> dict:
+    """Convert a database row from the crashes table to a JSON-serializable dict."""
+    d = dict(row)
+    report_date = d.get("report_date")
+    if report_date is not None:
+        d["report_date"] = str(report_date)
+    return d
+
 
 async def fetch_inspections(filters: dict) -> dict:
     """Fetch inspections from the inspections table with optional filters.
