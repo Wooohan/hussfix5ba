@@ -1309,112 +1309,9 @@ async def fetch_carriers(filters: dict) -> dict:
         )
 
     # ------------------------------------------------------------------
-    # Inspection-based filters – CTE pre-filtering by dot_number
-    # ------------------------------------------------------------------
-    # These filters aggregate the inspections table per dot_number and
-    # restrict carriers to those whose aggregate values fall within the
-    # requested range.  Each group of related min/max filters shares a
-    # single CTE so the inspections table is scanned at most once for
-    # all inspection filters combined.
-
-    _insp_cte_having: list[str] = []  # HAVING clauses for the inspection CTE
-    _dot_joins: list[str] = []        # INNER JOINs on dot_number
-
-    # oos_min / oos_max – total OOS violations across all inspections
-    if filters.get("oos_min") is not None:
-        _insp_cte_having.append(f"SUM(COALESCE(oos_total, 0)) >= ${idx}")
-        params.append(int(filters["oos_min"]))
-        idx += 1
-    if filters.get("oos_max") is not None:
-        _insp_cte_having.append(f"SUM(COALESCE(oos_total, 0)) <= ${idx}")
-        params.append(int(filters["oos_max"]))
-        idx += 1
-
-    # inspections_min / inspections_max – total number of inspections
-    if filters.get("inspections_min") is not None:
-        _insp_cte_having.append(f"COUNT(*) >= ${idx}")
-        params.append(int(filters["inspections_min"]))
-        idx += 1
-    if filters.get("inspections_max") is not None:
-        _insp_cte_having.append(f"COUNT(*) <= ${idx}")
-        params.append(int(filters["inspections_max"]))
-        idx += 1
-
-    if _insp_cte_having:
-        _cte_parts.append((
-            "_insp_agg",
-            "SELECT dot_number FROM inspections "
-            "GROUP BY dot_number "
-            "HAVING " + " AND ".join(_insp_cte_having),
-        ))
-        _dot_joins.append(
-            "INNER JOIN _insp_agg ON _insp_agg.dot_number = c.dot_number"
-        )
-
-    # ------------------------------------------------------------------
-    # Crash-based filters – CTE pre-filtering by dot_number
-    # ------------------------------------------------------------------
-    _crash_cte_having: list[str] = []
-
-    # crashes_min / crashes_max – total number of crash records
-    if filters.get("crashes_min") is not None:
-        _crash_cte_having.append(f"COUNT(*) >= ${idx}")
-        params.append(int(filters["crashes_min"]))
-        idx += 1
-    if filters.get("crashes_max") is not None:
-        _crash_cte_having.append(f"COUNT(*) <= ${idx}")
-        params.append(int(filters["crashes_max"]))
-        idx += 1
-
-    # injuries_min / injuries_max – total injuries across all crashes
-    if filters.get("injuries_min") is not None:
-        _crash_cte_having.append(f"SUM(COALESCE(injuries, 0)) >= ${idx}")
-        params.append(int(filters["injuries_min"]))
-        idx += 1
-    if filters.get("injuries_max") is not None:
-        _crash_cte_having.append(f"SUM(COALESCE(injuries, 0)) <= ${idx}")
-        params.append(int(filters["injuries_max"]))
-        idx += 1
-
-    # fatalities_min / fatalities_max – total fatalities across all crashes
-    if filters.get("fatalities_min") is not None:
-        _crash_cte_having.append(f"SUM(COALESCE(fatalities, 0)) >= ${idx}")
-        params.append(int(filters["fatalities_min"]))
-        idx += 1
-    if filters.get("fatalities_max") is not None:
-        _crash_cte_having.append(f"SUM(COALESCE(fatalities, 0)) <= ${idx}")
-        params.append(int(filters["fatalities_max"]))
-        idx += 1
-
-    # toway_min / toway_max – total tow-away crashes
-    if filters.get("toway_min") is not None:
-        _crash_cte_having.append(
-            f"SUM(CASE WHEN tow_away = true THEN 1 ELSE 0 END) >= ${idx}"
-        )
-        params.append(int(filters["toway_min"]))
-        idx += 1
-    if filters.get("toway_max") is not None:
-        _crash_cte_having.append(
-            f"SUM(CASE WHEN tow_away = true THEN 1 ELSE 0 END) <= ${idx}"
-        )
-        params.append(int(filters["toway_max"]))
-        idx += 1
-
-    if _crash_cte_having:
-        _cte_parts.append((
-            "_crash_agg",
-            "SELECT dot_number FROM crashes "
-            "GROUP BY dot_number "
-            "HAVING " + " AND ".join(_crash_cte_having),
-        ))
-        _dot_joins.append(
-            "INNER JOIN _crash_agg ON _crash_agg.dot_number = c.dot_number"
-        )
-
-    # ------------------------------------------------------------------
     # Default / WHERE / LIMIT / OFFSET
     # ------------------------------------------------------------------
-    is_filtered = len(conditions) > 0 or len(_ins_joins) > 0 or len(_dot_joins) > 0
+    is_filtered = len(conditions) > 0 or len(_ins_joins) > 0
     if not is_filtered:
         conditions.append("c.status_code = 'A'")
 
@@ -1459,8 +1356,6 @@ async def fetch_carriers(filters: dict) -> dict:
     from_clause = "carriers c"
     if _ins_joins:
         from_clause += " " + " ".join(_ins_joins)
-    if _dot_joins:
-        from_clause += " " + " ".join(_dot_joins)
 
     query = f"""{cte_prefix}
         SELECT {_LIST_COLS}
@@ -1588,62 +1483,6 @@ async def fetch_carriers(filters: dict) -> dict:
         else:
             for carrier in carrier_dicts:
                 carrier.setdefault("inspections", [])
-
-        # Batch-fetch crashes from the crashes table and attach them to
-        # each carrier by dot_number.  The frontend expects
-        # carrier.crashes to be an array.
-        if dot_numbers:
-            unique_dots_crash = list(set(dot_numbers))
-            try:
-                crash_rows = await pool.fetch(
-                    """
-                    SELECT report_number, report_seq_no, dot_number,
-                           report_date, report_state, fatalities, injuries,
-                           tow_away, hazmat_released, trafficway_desc,
-                           access_control_desc, road_surface_condition_desc,
-                           weather_condition_desc, light_condition_desc,
-                           vehicle_id_number, vehicle_license_number,
-                           vehicle_license_state, severity_weight,
-                           time_weight, citation_issued_desc, seq_num,
-                           not_preventable
-                    FROM crashes
-                    WHERE dot_number = ANY($1)
-                    ORDER BY report_date DESC NULLS LAST
-                    """,
-                    unique_dots_crash,
-                )
-                crash_map: dict[int, list[dict]] = {}
-                for cr in crash_rows:
-                    cd = dict(cr)
-                    dn = cd.get("dot_number")
-                    if dn is None:
-                        continue
-                    try:
-                        dn_int = int(dn)
-                    except (TypeError, ValueError):
-                        continue
-                    # Convert date objects to ISO strings for JSON
-                    if cd.get("report_date") is not None:
-                        cd["report_date"] = str(cd["report_date"])
-                    crash_map.setdefault(dn_int, []).append(cd)
-
-                for carrier in carrier_dicts:
-                    cdn = carrier.get("dot_number")
-                    try:
-                        cdn_int = int(cdn) if cdn is not None else None
-                    except (TypeError, ValueError):
-                        cdn_int = None
-                    if cdn_int is not None and cdn_int in crash_map:
-                        carrier["crashes"] = crash_map[cdn_int]
-                    else:
-                        carrier["crashes"] = []
-            except Exception as _e:
-                print(f"[DB] Warning: failed to batch-fetch crashes: {_e}")
-                for carrier in carrier_dicts:
-                    carrier.setdefault("crashes", [])
-        else:
-            for carrier in carrier_dicts:
-                carrier.setdefault("crashes", [])
 
         return {
             "data": carrier_dicts,
