@@ -461,6 +461,8 @@ async def upsert_carrier(record: dict) -> bool:
     dot = record.get("dot_number")
     if not dot:
         return False
+    # Invalidate carrier search cache on write
+    await cache_delete_pattern("carriers:*")
     try:
         await pool.execute(
             """
@@ -907,7 +909,18 @@ async def fetch_carriers(filters: dict) -> dict:
     4. ``carrier_operation`` and ``state`` use ``= ANY($N)`` instead
        of N separate OR-clauses, letting PG use the B-tree index in a
        single pass.
+    5. Redis caching: results are cached for 5 minutes based on a
+       deterministic hash of the filter dict, so repeated identical
+       queries are served from Redis instead of hitting PostgreSQL.
     """
+    # ── Redis cache check ─────────────────────────────────────────────────
+    import hashlib as _hashlib
+    _filter_sig = json.dumps(filters, sort_keys=True, default=str)
+    _cache_key = "carriers:" + _hashlib.md5(_filter_sig.encode()).hexdigest()
+    _cached = await cache_get(_cache_key)
+    if _cached is not None:
+        return _cached
+
     pool = get_pool()
 
     conditions: list[str] = []
@@ -1705,10 +1718,13 @@ async def fetch_carriers(filters: dict) -> dict:
             for carrier in carrier_dicts:
                 carrier.setdefault("crashes", [])
 
-        return {
+        result = {
             "data": carrier_dicts,
             "filtered_count": filtered_count,
         }
+        # ── Store result in Redis cache (5 min TTL) ──────────────────────
+        await cache_set(_cache_key, result, ttl=300)
+        return result
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
@@ -1716,6 +1732,8 @@ async def fetch_carriers(filters: dict) -> dict:
 async def delete_carrier(dot_number: str) -> bool:
     """Delete a carrier by DOT number (Census schema uses dot_number as key)."""
     pool = get_pool()
+    # Invalidate carrier search cache on delete
+    await cache_delete_pattern("carriers:*")
     try:
         result = await pool.execute(
             "DELETE FROM carriers WHERE dot_number = $1",
