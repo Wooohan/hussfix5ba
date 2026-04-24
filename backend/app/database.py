@@ -1,4 +1,3 @@
-
 import os
 import json
 import asyncio
@@ -1349,7 +1348,7 @@ async def fetch_carriers(filters: dict) -> dict:
             "HAVING " + " AND ".join(_insp_cte_having),
         ))
         _dot_joins.append(
-            "INNER JOIN _insp_agg ON _insp_agg.dot_number = c.dot_number"
+            "INNER JOIN _insp_agg ON _insp_agg.dot_number = c.dot_number::bigint"
         )
 
     # ------------------------------------------------------------------
@@ -1409,7 +1408,7 @@ async def fetch_carriers(filters: dict) -> dict:
             "HAVING " + " AND ".join(_crash_cte_having),
         ))
         _dot_joins.append(
-            "INNER JOIN _crash_agg ON _crash_agg.dot_number = c.dot_number"
+            "INNER JOIN _crash_agg ON _crash_agg.dot_number = c.dot_number::bigint"
         )
 
     # ------------------------------------------------------------------
