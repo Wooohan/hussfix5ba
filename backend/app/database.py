@@ -456,15 +456,13 @@ async def upsert_carrier(record: dict) -> bool:
 
     The carriers table is now the Company Census File schema.
     We upsert on dot_number (bigint) which is the natural key.
-
-    NOTE: Cache invalidation is intentionally NOT done here.  It is handled
-    at the API layer (main.py) so that batch upserts only invalidate once
-    per request instead of once per row.
     """
     pool = get_pool()
     dot = record.get("dot_number")
     if not dot:
         return False
+    # Invalidate carrier search cache on write
+    await cache_delete_pattern("carriers:*")
     try:
         await pool.execute(
             """
@@ -1732,11 +1730,10 @@ async def fetch_carriers(filters: dict) -> dict:
         return {"data": [], "filtered_count": 0}
 
 async def delete_carrier(dot_number: str) -> bool:
-    """Delete a carrier by DOT number (Census schema uses dot_number as key).
-
-    NOTE: Cache invalidation is handled at the API layer (main.py).
-    """
+    """Delete a carrier by DOT number (Census schema uses dot_number as key)."""
     pool = get_pool()
+    # Invalidate carrier search cache on delete
+    await cache_delete_pattern("carriers:*")
     try:
         result = await pool.execute(
             "DELETE FROM carriers WHERE dot_number = $1",
