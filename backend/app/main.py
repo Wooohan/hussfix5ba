@@ -39,11 +39,15 @@ from app.database import (
     fetch_crash_by_report, fetch_crashes_by_dot,
     fetch_safety_by_dot,
 )
+from app.cache import connect_cache, close_cache
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     await connect_db()
+    await connect_cache()
     yield
     await close_clients()
+    await close_cache()
     await close_db()
 app = FastAPI(lifespan=lifespan)
 _PUBLIC_PATHS: set[str] = {
