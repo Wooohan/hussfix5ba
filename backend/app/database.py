@@ -3063,3 +3063,70 @@ async def fetch_crashes_by_dot(dot_number: str) -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching crashes for DOT {dot_number}: {e}")
         return []
+
+
+async def fetch_safety_by_dot(dot_number: str) -> dict | None:
+    """Fetch safety data for a carrier from the safety table.
+
+    Returns a dict with BASIC scores, OOS rates, and inspection totals,
+    or None if no record exists.
+    """
+    pool = get_pool()
+    try:
+        dot_int = int(dot_number.strip())
+    except (ValueError, TypeError):
+        return None
+    try:
+        row = await pool.fetchrow(
+            "SELECT * FROM safety WHERE dot_number = $1",
+            dot_int,
+        )
+        if not row:
+            return None
+        d = dict(row)
+
+        # Calculate OOS rates
+        driver_insp = d.get("driver_insp_total") or 0
+        driver_oos = d.get("driver_oos_insp_total") or 0
+        vehicle_insp = d.get("vehicle_insp_total") or 0
+        vehicle_oos = d.get("vehicle_oos_insp_total") or 0
+
+        driver_oos_rate = round((driver_oos / driver_insp) * 100, 1) if driver_insp > 0 else 0.0
+        vehicle_oos_rate = round((vehicle_oos / vehicle_insp) * 100, 1) if vehicle_insp > 0 else 0.0
+
+        # Build BASIC scores list
+        basic_scores = []
+        for key, label in [
+            ("unsafe_driv", "Unsafe Driving"),
+            ("hos_driv", "HOS Compliance"),
+            ("driv_fit", "Driver Fitness"),
+            ("contr_subst", "Controlled Substances"),
+            ("veh_maint", "Vehicle Maintenance"),
+        ]:
+            measure_val = d.get(f"{key}_measure")
+            basic_scores.append({
+                "category": label,
+                "measure": str(round(float(measure_val), 1)) if measure_val is not None else "N/A",
+                "inspWithViol": d.get(f"{key}_insp_w_viol") or 0,
+                "alert": (d.get(f"{key}_ac") or "").strip(),
+            })
+
+        return {
+            "dot_number": str(d.get("dot_number", "")),
+            "type": (d.get("type") or "").strip(),
+            "insp_total": d.get("insp_total") or 0,
+            "driver_insp_total": driver_insp,
+            "driver_oos_insp_total": driver_oos,
+            "driver_oos_rate": driver_oos_rate,
+            "vehicle_insp_total": vehicle_insp,
+            "vehicle_oos_insp_total": vehicle_oos,
+            "vehicle_oos_rate": vehicle_oos_rate,
+            "oos_rates": [
+                {"type": "Driver", "rate": f"{driver_oos_rate}%"},
+                {"type": "Vehicle", "rate": f"{vehicle_oos_rate}%"},
+            ],
+            "basic_scores": basic_scores,
+        }
+    except Exception as e:
+        print(f"[DB] Error fetching safety for DOT {dot_number}: {e}")
+        return None
