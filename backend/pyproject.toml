@@ -11,6 +11,7 @@ beautifulsoup4 = "^4.14.3"
 lxml = "^6.0.2"
 python-dotenv = "^1.2.2"
 asyncpg = "^0.30.0"
+redis = {extras = ["hiredis"], version = "^5.0.0"}
 bcrypt = "^5.0.0"
 PyJWT = "^2.9.0"
 [build-system]
