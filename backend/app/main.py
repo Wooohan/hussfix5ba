@@ -39,7 +39,7 @@ from app.database import (
     fetch_crash_by_report, fetch_crashes_by_dot,
     fetch_safety_by_dot,
 )
-from app.cache import connect_cache, close_cache, cache_backend, cache_stats, cache_delete_pattern
+from app.cache import connect_cache, close_cache
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -169,11 +169,6 @@ async def healthz():
 @app.get("/health")
 async def health():
     return {"status": "ok", "message": "FMCSA Scraper Backend is running"}
-
-@app.get("/api/cache/status")
-async def api_cache_status():
-    """Return current cache backend and stats for debugging."""
-    return {"backend": cache_backend(), "stats": cache_stats()}
 @app.get("/api/get-ip")
 async def get_ip(request: Request):
     forwarded = request.headers.get("x-forwarded-for", "")
@@ -436,8 +431,6 @@ async def api_upsert_carrier(request: Request):
     body = await request.json()
     ok = await upsert_carrier(body)
     if ok:
-        await cache_delete_pattern("carriers:*")
-        await cache_delete_pattern("dashboard:*")
         return {"success": True}
     return JSONResponse(status_code=400, content={"success": False, "error": "Failed to upsert carrier"})
 @app.post("/api/carriers/batch")
@@ -458,10 +451,6 @@ async def api_upsert_carriers_batch(request: Request):
                 saved += 1
             else:
                 failed += 1
-    # Invalidate cache once after the entire batch completes
-    if saved > 0:
-        await cache_delete_pattern("carriers:*")
-        await cache_delete_pattern("dashboard:*")
     return {"success": failed == 0, "saved": saved, "failed": failed}
 @app.delete("/api/carriers/{dot_number}")
 async def api_delete_carrier(dot_number: str, request: Request):
@@ -469,8 +458,6 @@ async def api_delete_carrier(dot_number: str, request: Request):
         return JSONResponse(status_code=403, content={"error": "Admin access required"})
     ok = await db_delete_carrier(dot_number)
     if ok:
-        await cache_delete_pattern("carriers:*")
-        await cache_delete_pattern("dashboard:*")
         return {"success": True}
     return JSONResponse(status_code=404, content={"success": False, "error": "Carrier not found"})
 @app.get("/api/carriers/count")
