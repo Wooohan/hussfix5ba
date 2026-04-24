@@ -1490,11 +1490,19 @@ async def fetch_carriers(filters: dict) -> dict:
     if _ins_joins:
         from_clause += " " + " ".join(_ins_joins)
 
+    # When a highly selective filter (dot_number, mc_number) is active,
+    # ORDER BY c.id DESC tricks Postgres into a full PK scan instead of
+    # using the column index.  Use legal_name as a neutral sort in that case.
+    _has_pinpoint_filter = bool(
+        filters.get("dot_number") or filters.get("mc_number")
+    )
+    _order = "c.legal_name ASC" if _has_pinpoint_filter else "c.id DESC"
+
     query = f"""{cte_prefix}
         SELECT {_LIST_COLS}
         FROM {from_clause}
         WHERE {where}
-        ORDER BY c.id DESC
+        ORDER BY {_order}
         LIMIT {limit_val} OFFSET {offset_val}
     """
 
