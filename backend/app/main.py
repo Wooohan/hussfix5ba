@@ -35,6 +35,8 @@ from app.database import (
     fetch_insurance_history,
     fetch_inspections, get_inspections_count, get_inspections_dashboard_stats,
     fetch_inspection_by_id, fetch_inspections_by_dot,
+    fetch_crashes, get_crashes_count, get_crashes_dashboard_stats,
+    fetch_crash_by_report, fetch_crashes_by_dot,
 )
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -1013,3 +1015,91 @@ async def api_get_inspections_by_dot(dot_number: int):
     """Get all inspections for a specific DOT number."""
     inspections = await fetch_inspections_by_dot(dot_number)
     return {"success": True, "dot_number": dot_number, "inspections": inspections, "count": len(inspections)}
+
+# ── Crashes endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/crashes")
+async def api_fetch_crashes(
+    dot_number: str = Query(None),
+    report_number: str = Query(None),
+    report_state: str = Query(None),
+    report_date_from: str = Query(None),
+    report_date_to: str = Query(None),
+    fatalities_min: str = Query(None),
+    fatalities_max: str = Query(None),
+    injuries_min: str = Query(None),
+    injuries_max: str = Query(None),
+    tow_away: str = Query(None),
+    not_preventable: str = Query(None),
+    weather_condition_desc: str = Query(None),
+    vehicle_id_number: str = Query(None),
+    limit: int = Query(None),
+    offset: int = Query(0),
+):
+    """Fetch crashes with optional filters."""
+    filters = {}
+    if dot_number: filters["dot_number"] = dot_number
+    if report_number: filters["report_number"] = report_number
+    if report_state: filters["report_state"] = report_state
+    if report_date_from: filters["report_date_from"] = report_date_from
+    if report_date_to: filters["report_date_to"] = report_date_to
+    if tow_away: filters["tow_away"] = tow_away
+    if not_preventable: filters["not_preventable"] = not_preventable
+    if weather_condition_desc: filters["weather_condition_desc"] = weather_condition_desc
+    if vehicle_id_number: filters["vehicle_id_number"] = vehicle_id_number
+
+    if fatalities_min:
+        try:
+            filters["fatalities_min"] = int(fatalities_min)
+        except ValueError:
+            pass
+    if fatalities_max:
+        try:
+            filters["fatalities_max"] = int(fatalities_max)
+        except ValueError:
+            pass
+    if injuries_min:
+        try:
+            filters["injuries_min"] = int(injuries_min)
+        except ValueError:
+            pass
+    if injuries_max:
+        try:
+            filters["injuries_max"] = int(injuries_max)
+        except ValueError:
+            pass
+
+    if offset > 0: filters["offset"] = offset
+    if limit is not None:
+        filters["limit"] = limit
+    else:
+        filters["limit"] = 500
+
+    result = await fetch_crashes(filters)
+    return result
+
+@app.get("/api/crashes/count")
+async def api_get_crashes_count():
+    """Get total count of crashes."""
+    count = await get_crashes_count()
+    return {"count": count}
+
+@app.get("/api/crashes/dashboard-stats")
+async def api_get_crashes_dashboard_stats():
+    """Get dashboard statistics for crashes."""
+    stats = await get_crashes_dashboard_stats()
+    return stats
+
+@app.get("/api/crashes/by-dot/{dot_number}")
+async def api_get_crashes_by_dot(dot_number: str):
+    """Get all crashes for a specific DOT number."""
+    crashes = await fetch_crashes_by_dot(dot_number)
+    return {"success": True, "dot_number": dot_number, "crashes": crashes, "count": len(crashes)}
+
+@app.get("/api/crashes/{report_number}")
+async def api_get_crash_detail(report_number: str):
+    """Get details of a single crash by report_number."""
+    crash = await fetch_crash_by_report(report_number)
+    if crash:
+        return crash
+    return JSONResponse(status_code=404, content={"error": "Crash not found"})
