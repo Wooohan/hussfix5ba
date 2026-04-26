@@ -20,159 +20,268 @@ _DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
--- NOTE: carriers table is now populated from the Company Census File (az4n-8mr2)
+-- NOTE: carriers table is populated from the Company Census File (az4n-8mr2)
 -- with ~4.4M records.  The table already exists in the database so we do NOT
 -- try to CREATE it here.  The schema is managed externally.
 
 CREATE TABLE IF NOT EXISTS carriers (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    "MCS150_DATE" text,
-    "ADD_DATE" text,
-    "STATUS_CODE" text,
-    "DOT_NUMBER" text,
-    "DUN_BRADSTREET_NO" text,
-    "PHY_OMC_REGION" text,
-    "SAFETY_INV_TERR" text,
-    "CARRIER_OPERATION" text,
-    "BUSINESS_ORG_ID" text,
-    "MCS150_MILEAGE" text,
-    "MCS150_MILEAGE_YEAR" text,
-    "MCS151_MILEAGE" text,
-    "TOTAL_CARS" text,
-    "MCS150_UPDATE_CODE_ID" text,
-    "PRIOR_REVOKE_FLAG" text,
-    "PRIOR_REVOKE_DOT_NUMBER" text,
-    "PHONE" text,
-    "FAX" text,
-    "CELL_PHONE" text,
-    "COMPANY_OFFICER_1" text,
-    "COMPANY_OFFICER_2" text,
-    "BUSINESS_ORG_DESC" text,
-    "TRUCK_UNITS" text,
-    "POWER_UNITS" integer,
-    "BUS_UNITS" text,
-    "FLEETSIZE" text,
-    "REVIEW_ID" text,
-    "RECORDABLE_CRASH_RATE" text,
-    "MAIL_NATIONALITY_INDICATOR" text,
-    "PHY_NATIONALITY_INDICATOR" text,
-    "PHY_BARRIO" text,
-    "MAIL_BARRIO" text,
-    "CARSHIP" text,
-    "DOCKET1PREFIX" text,
-    "DOCKET1" text,
-    "DOCKET2PREFIX" text,
-    "DOCKET2" text,
-    "DOCKET3PREFIX" text,
-    "DOCKET3" text,
-    "POINTNUM" text,
-    "TOTAL_INTRASTATE_DRIVERS" text,
-    "MCSIPSTEP" text,
-    "MCSIPDATE" text,
-    "HM_Ind" text,
-    "INTERSTATE_BEYOND_100_MILES" text,
-    "INTERSTATE_WITHIN_100_MILES" text,
-    "INTRASTATE_BEYOND_100_MILES" text,
-    "INTRASTATE_WITHIN_100_MILES" text,
-    "TOTAL_CDL" text,
-    "TOTAL_DRIVERS" integer,
-    "AVG_DRIVERS_LEASED_PER_MONTH" text,
-    "CLASSDEF" text,
-    "LEGAL_NAME" text,
-    "DBA_NAME" text,
-    "PHY_STREET" text,
-    "PHY_CITY" text,
-    "PHY_COUNTRY" text,
-    "PHY_STATE" text,
-    "PHY_ZIP" text,
-    "PHY_CNTY" text,
-    "CARRIER_MAILING_STREET" text,
-    "CARRIER_MAILING_STATE" text,
-    "CARRIER_MAILING_CITY" text,
-    "CARRIER_MAILING_COUNTRY" text,
-    "CARRIER_MAILING_ZIP" text,
-    "CARRIER_MAILING_CNTY" text,
-    "CARRIER_MAILING_UND_DATE" text,
-    "DRIVER_INTER_TOTAL" text,
-    "EMAIL_ADDRESS" text,
-    "REVIEW_TYPE" text,
-    "REVIEW_DATE" text,
-    "SAFETY_RATING" text,
-    "SAFETY_RATING_DATE" text,
-    "UNDELIV_PHY" text,
-    "CRGO_GENFREIGHT" text,
-    "CRGO_HOUSEHOLD" text,
-    "CRGO_METALSHEET" text,
-    "CRGO_MOTOVEH" text,
-    "CRGO_DRIVETOW" text,
-    "CRGO_LOGPOLE" text,
-    "CRGO_BLDGMAT" text,
-    "CRGO_MOBILEHOME" text,
-    "CRGO_MACHLRG" text,
-    "CRGO_PRODUCE" text,
-    "CRGO_LIQGAS" text,
-    "CRGO_INTERMODAL" text,
-    "CRGO_PASSENGERS" text,
-    "CRGO_OILFIELD" text,
-    "CRGO_LIVESTOCK" text,
-    "CRGO_GRAINFEED" text,
-    "CRGO_COALCOKE" text,
-    "CRGO_MEAT" text,
-    "CRGO_GARBAGE" text,
-    "CRGO_USMAIL" text,
-    "CRGO_CHEM" text,
-    "CRGO_DRYBULK" text,
-    "CRGO_COLDFOOD" text,
-    "CRGO_BEVERAGES" text,
-    "CRGO_PAPERPROD" text,
-    "CRGO_UTILITY" text,
-    "CRGO_FARMSUPP" text,
-    "CRGO_CONSTRUCT" text,
-    "CRGO_WATERWELL" text,
-    "CRGO_CARGOOTHR" text,
-    "CRGO_CARGOOTHR_DESC" text,
-    "OWNTRUCK" text,
-    "OWNTRACT" text,
-    "OWNTRAIL" text,
-    "OWNCOACH" text,
-    "OWNSCHOOL_1_8" text,
-    "OWNSCHOOL_9_15" text,
-    "OWNSCHOOL_16" text,
-    "OWNBUS_16" text,
-    "OWNVAN_1_8" text,
-    "OWNVAN_9_15" text,
-    "OWNLIMO_1_8" text,
-    "OWNLIMO_9_15" text,
-    "OWNLIMO_16" text,
-    "TRMTRUCK" text,
-    "TRMTRACT" text,
-    "TRMTRAIL" text,
-    "TRMCOACH" text,
-    "TRMSCHOOL_1_8" text,
-    "TRMSCHOOL_9_15" text,
-    "TRMSCHOOL_16" text,
-    "TRMBUS_16" text,
-    "TRMVAN_1_8" text,
-    "TRMVAN_9_15" text,
-    "TRMLIMO_1_8" text,
-    "TRMLIMO_9_15" text,
-    "TRMLIMO_16" text,
-    "TRPTRUCK" text,
-    "TRPTRACT" text,
-    "TRPTRAIL" text,
-    "TRPCOACH" text,
-    "TRPSCHOOL_1_8" text,
-    "TRPSCHOOL_9_15" text,
-    "TRPSCHOOL_16" text,
-    "TRPBUS_16" text,
-    "TRPVAN_1_8" text,
-    "TRPVAN_9_15" text,
-    "TRPLIMO_1_8" text,
-    "TRPLIMO_9_15" text,
-    "TRPLIMO_16" text,
-    "DOCKET1_STATUS_CODE" text,
-    "DOCKET2_STATUS_CODE" text,
-    "DOCKET3_STATUS_CODE" text
+    mcs150_date text,
+    add_date text,
+    status_code text,
+    dot_number text,
+    dun_bradstreet_no text,
+    phy_omc_region text,
+    safety_inv_terr text,
+    carrier_operation text,
+    business_org_id text,
+    mcs150_mileage text,
+    mcs150_mileage_year text,
+    mcs151_mileage text,
+    total_cars text,
+    mcs150_update_code_id text,
+    prior_revoke_flag text,
+    prior_revoke_dot_number text,
+    phone text,
+    fax text,
+    cell_phone text,
+    company_officer_1 text,
+    company_officer_2 text,
+    business_org_desc text,
+    truck_units text,
+    power_units integer,
+    bus_units text,
+    fleetsize text,
+    review_id text,
+    recordable_crash_rate text,
+    mail_nationality_indicator text,
+    phy_nationality_indicator text,
+    phy_barrio text,
+    mail_barrio text,
+    carship text,
+    docket1prefix text,
+    docket1 text,
+    docket2prefix text,
+    docket2 text,
+    docket3prefix text,
+    docket3 text,
+    pointnum text,
+    total_intrastate_drivers text,
+    mcsipstep text,
+    mcsipdate text,
+    hm_ind text,
+    interstate_beyond_100_miles text,
+    interstate_within_100_miles text,
+    intrastate_beyond_100_miles text,
+    intrastate_within_100_miles text,
+    total_cdl text,
+    total_drivers integer,
+    avg_drivers_leased_per_month text,
+    classdef text,
+    legal_name text,
+    dba_name text,
+    phy_street text,
+    phy_city text,
+    phy_country text,
+    phy_state text,
+    phy_zip text,
+    phy_cnty text,
+    carrier_mailing_street text,
+    carrier_mailing_state text,
+    carrier_mailing_city text,
+    carrier_mailing_country text,
+    carrier_mailing_zip text,
+    carrier_mailing_cnty text,
+    carrier_mailing_und_date text,
+    driver_inter_total text,
+    email_address text,
+    review_type text,
+    review_date text,
+    safety_rating text,
+    safety_rating_date text,
+    undeliv_phy text,
+    crgo_genfreight text,
+    crgo_household text,
+    crgo_metalsheet text,
+    crgo_motoveh text,
+    crgo_drivetow text,
+    crgo_logpole text,
+    crgo_bldgmat text,
+    crgo_mobilehome text,
+    crgo_machlrg text,
+    crgo_produce text,
+    crgo_liqgas text,
+    crgo_intermodal text,
+    crgo_passengers text,
+    crgo_oilfield text,
+    crgo_livestock text,
+    crgo_grainfeed text,
+    crgo_coalcoke text,
+    crgo_meat text,
+    crgo_garbage text,
+    crgo_usmail text,
+    crgo_chem text,
+    crgo_drybulk text,
+    crgo_coldfood text,
+    crgo_beverages text,
+    crgo_paperprod text,
+    crgo_utility text,
+    crgo_farmsupp text,
+    crgo_construct text,
+    crgo_waterwell text,
+    crgo_cargoothr text,
+    crgo_cargoothr_desc text,
+    owntruck text,
+    owntract text,
+    owntrail text,
+    owncoach text,
+    ownschool_1_8 text,
+    ownschool_9_15 text,
+    ownschool_16 text,
+    ownbus_16 text,
+    ownvan_1_8 text,
+    ownvan_9_15 text,
+    ownlimo_1_8 text,
+    ownlimo_9_15 text,
+    ownlimo_16 text,
+    trmtruck text,
+    trmtract text,
+    trmtrail text,
+    trmcoach text,
+    trmschool_1_8 text,
+    trmschool_9_15 text,
+    trmschool_16 text,
+    trmbus_16 text,
+    trmvan_1_8 text,
+    trmvan_9_15 text,
+    trmlimo_1_8 text,
+    trmlimo_9_15 text,
+    trmlimo_16 text,
+    trptruck text,
+    trptract text,
+    trptrail text,
+    trpcoach text,
+    trpschool_1_8 text,
+    trpschool_9_15 text,
+    trpschool_16 text,
+    trpbus_16 text,
+    trpvan_1_8 text,
+    trpvan_9_15 text,
+    trplimo_1_8 text,
+    trplimo_9_15 text,
+    trplimo_16 text,
+    docket1_status_code text,
+    docket2_status_code text,
+    docket3_status_code text
+);
+
+-- ── Insurance history ───────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS insurance_history (
+    id SERIAL PRIMARY KEY,
+    docket_number VARCHAR(20),
+    dot_number TEXT,
+    ins_form_code VARCHAR(10),
+    ins_type_desc VARCHAR(50),
+    name_company VARCHAR(100),
+    policy_no VARCHAR(50),
+    trans_date VARCHAR(15),
+    underl_lim_amount VARCHAR(15),
+    max_cov_amount VARCHAR(15),
+    effective_date VARCHAR(15),
+    cancl_effective_date VARCHAR(15)
+);
+
+-- ── Inspections ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS inspections (
+    unique_id BIGINT,
+    report_number TEXT,
+    report_state TEXT,
+    dot_number BIGINT,
+    insp_date TEXT,
+    insp_level_id BIGINT,
+    county_code_state TEXT,
+    time_weight BIGINT,
+    driver_oos_total BIGINT,
+    vehicle_oos_total BIGINT,
+    total_hazmat_sent BIGINT,
+    oos_total BIGINT,
+    hazmat_oos_total BIGINT,
+    hazmat_placard_req BOOLEAN,
+    unit_type_desc TEXT,
+    unit_make TEXT,
+    unit_license TEXT,
+    unit_license_state TEXT,
+    vin TEXT,
+    unit_decal_number TEXT,
+    unit_type_desc2 TEXT,
+    unit_make2 TEXT,
+    unit_license2 TEXT,
+    unit_license_state2 TEXT,
+    vin2 TEXT,
+    unit_decal_number2 TEXT,
+    unsafe_insp BOOLEAN,
+    fatigued_insp BOOLEAN,
+    dr_fitness_insp BOOLEAN,
+    subt_alcohol_insp BOOLEAN,
+    vh_maint_insp BOOLEAN,
+    hm_insp BOOLEAN,
+    basic_viol BIGINT,
+    unsafe_viol BIGINT,
+    fatigued_viol BIGINT,
+    dr_fitness_viol BIGINT,
+    subt_alcohol_viol BIGINT,
+    vh_maint_viol BIGINT,
+    hm_viol DOUBLE PRECISION
+);
+
+-- ── Crashes ─────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS crashes (
+    report_number TEXT,
+    report_seq_no INTEGER,
+    dot_number TEXT,
+    report_date DATE,
+    report_state TEXT,
+    fatalities INTEGER,
+    injuries INTEGER,
+    tow_away BOOLEAN,
+    hazmat_released BOOLEAN,
+    trafficway_desc TEXT,
+    access_control_desc TEXT,
+    road_surface_condition_desc TEXT,
+    weather_condition_desc TEXT,
+    light_condition_desc TEXT,
+    vehicle_id_number TEXT,
+    vehicle_license_number TEXT,
+    vehicle_license_state TEXT,
+    citation_issued_desc TEXT,
+    seq_num INTEGER,
+    not_preventable BOOLEAN
+);
+
+-- ── Safety ──────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS safety (
+    dot_number BIGINT,
+    insp_total INTEGER,
+    driver_insp_total INTEGER,
+    driver_oos_insp_total INTEGER,
+    vehicle_insp_total INTEGER,
+    vehicle_oos_insp_total INTEGER,
+    unsafe_driv_insp_w_viol INTEGER,
+    unsafe_driv_measure NUMERIC,
+    unsafe_driv_ac VARCHAR(255),
+    hos_driv_insp_w_viol INTEGER,
+    hos_driv_measure NUMERIC,
+    hos_driv_ac VARCHAR(255),
+    driv_fit_insp_w_viol INTEGER,
+    driv_fit_measure NUMERIC,
+    driv_fit_ac VARCHAR(255),
+    contr_subst_insp_w_viol INTEGER,
+    contr_subst_measure NUMERIC,
+    contr_subst_ac VARCHAR(255),
+    veh_maint_insp_w_viol INTEGER,
+    veh_maint_measure NUMERIC,
+    veh_maint_ac VARCHAR(255),
+    type VARCHAR(50)
 );
 CREATE TABLE IF NOT EXISTS fmcsa_register (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -417,11 +526,14 @@ INSERT INTO users (user_id, name, email, role, plan, daily_limit, records_extrac
 VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 0, '192.168.1.1', false, false)
 ON CONFLICT (email) DO NOTHING;
 
--- ── Performance indexes for inspections & crashes tables ────────────────────
+-- ── Performance indexes ─────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_bigint ON carriers ((dot_number::bigint)) WHERE dot_number ~ '^[0-9]+$';
+CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
+CREATE INDEX IF NOT EXISTS idx_insurance_history_dot ON insurance_history(dot_number);
+CREATE INDEX IF NOT EXISTS idx_safety_dot_number ON safety(dot_number);
 """
 
 async def connect_db() -> None:
@@ -1570,138 +1682,114 @@ async def fetch_carriers(filters: dict) -> dict:
                 )
             filtered_count = count_row["cnt"] if count_row else 0
 
-        # Batch-fetch insurance history for the returned rows
+        # ── Parallel batch-fetch: insurance, inspections, crashes ────────
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
+
+        # Prepare keys for all three fetches
         docket_keys = []
+        dot_numbers_int: list[int] = []
+        dot_numbers_str: list[str] = []
         for row in rows:
             d = dict(row)
             pfx = d.get("docket1prefix") or ""
             num = d.get("docket1") or ""
             docket_keys.append(f"{pfx}{num}" if pfx and num else "")
+            dn = d.get("dot_number")
+            if dn is not None:
+                dn_s = str(dn).strip()
+                if dn_s:
+                    dot_numbers_str.append(dn_s)
+                    try:
+                        dot_numbers_int.append(int(dn))
+                    except (TypeError, ValueError):
+                        pass
 
-        non_empty_keys = [k for k in docket_keys if k]
-        if non_empty_keys:
-            unique_keys = list(set(non_empty_keys))
-            ih_rows = await pool.fetch(
-                """
-                SELECT docket_number, ins_type_desc, max_cov_amount,
-                       underl_lim_amount, policy_no, effective_date,
-                       ins_form_code, name_company, trans_date,
-                       cancl_effective_date
-                FROM insurance_history
-                WHERE docket_number = ANY($1)
-                ORDER BY effective_date DESC
-                """,
-                unique_keys,
+        unique_docket_keys = list(set(k for k in docket_keys if k))
+        unique_dots_int = list(set(dot_numbers_int))
+        unique_dots_str = list(set(dot_numbers_str))
+
+        # Fire all three batch fetches in parallel
+        async def _fetch_insurance():
+            if not unique_docket_keys:
+                return []
+            return await pool.fetch(
+                """SELECT docket_number, ins_type_desc, max_cov_amount,
+                          underl_lim_amount, policy_no, effective_date,
+                          ins_form_code, name_company, trans_date,
+                          cancl_effective_date
+                   FROM insurance_history
+                   WHERE docket_number = ANY($1)
+                   ORDER BY effective_date DESC""",
+                unique_docket_keys,
             )
+
+        async def _fetch_insp_batch():
+            if not unique_dots_int:
+                return []
+            return await pool.fetch(
+                """SELECT * FROM inspections
+                   WHERE dot_number = ANY($1)
+                   ORDER BY insp_date DESC NULLS LAST""",
+                unique_dots_int,
+            )
+
+        async def _fetch_crash_batch():
+            if not unique_dots_str:
+                return []
+            return await pool.fetch(
+                """SELECT * FROM crashes
+                   WHERE dot_number = ANY($1)
+                   ORDER BY report_date DESC NULLS LAST""",
+                unique_dots_str,
+            )
+
+        ih_rows, insp_rows_batch, crash_rows_batch = await asyncio.gather(
+            _fetch_insurance(),
+            _fetch_insp_batch(),
+            _fetch_crash_batch(),
+        )
+
+        # Attach insurance history
+        if ih_rows:
             ih_map: dict[str, list[dict]] = {}
             for ih_row in ih_rows:
                 dk = ih_row["docket_number"]
-                if dk not in ih_map:
-                    ih_map[dk] = []
-                ih_map[dk].append(dict(ih_row))
-
+                ih_map.setdefault(dk, []).append(dict(ih_row))
             for i, carrier in enumerate(carrier_dicts):
                 dk = docket_keys[i]
                 if dk and dk in ih_map:
                     carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
 
-        # Batch-fetch inspections from the new inspections table and attach
-        # them to each carrier by dot_number. The frontend expects
-        # carrier.inspections to be an array.
-        dot_numbers = []
-        for row in rows:
-            d = dict(row)
+        # Attach inspections
+        insp_map: dict[int, list[dict]] = {}
+        for ir in insp_rows_batch:
+            d = _inspection_row_to_dict(ir)
             dn = d.get("dot_number")
-            if dn is not None:
-                try:
-                    dot_numbers.append(int(dn))
-                except (TypeError, ValueError):
-                    pass
-
-        if dot_numbers:
-            unique_dots = list(set(dot_numbers))
+            if dn is None:
+                continue
             try:
-                insp_rows = await pool.fetch(
-                    """
-                    SELECT *
-                    FROM inspections
-                    WHERE dot_number = ANY($1)
-                    ORDER BY insp_date DESC NULLS LAST
-                    """,
-                    unique_dots,
-                )
-                insp_map: dict[int, list[dict]] = {}
-                for ir in insp_rows:
-                    d = _inspection_row_to_dict(ir)
-                    dn = d.get("dot_number")
-                    if dn is None:
-                        continue
-                    try:
-                        dn_int = int(dn)
-                    except (TypeError, ValueError):
-                        continue
-                    insp_map.setdefault(dn_int, []).append(d)
-
-                for carrier in carrier_dicts:
-                    cdn = carrier.get("dot_number")
-                    try:
-                        cdn_int = int(cdn) if cdn is not None else None
-                    except (TypeError, ValueError):
-                        cdn_int = None
-                    if cdn_int is not None and cdn_int in insp_map:
-                        carrier["inspections"] = insp_map[cdn_int]
-                    else:
-                        carrier["inspections"] = []
-            except Exception as _e:
-                print(f"[DB] Warning: failed to batch-fetch inspections: {_e}")
-                for carrier in carrier_dicts:
-                    carrier.setdefault("inspections", [])
-        else:
-            for carrier in carrier_dicts:
-                carrier.setdefault("inspections", [])
-
-        # Batch-fetch crashes from the crashes table and attach to carriers
-        dot_str_numbers = []
-        for row in rows:
-            d = dict(row)
-            dn = d.get("dot_number")
-            if dn is not None and str(dn).strip():
-                dot_str_numbers.append(str(dn).strip())
-
-        if dot_str_numbers:
-            unique_dot_strs = list(set(dot_str_numbers))
+                insp_map.setdefault(int(dn), []).append(d)
+            except (TypeError, ValueError):
+                continue
+        for carrier in carrier_dicts:
+            cdn = carrier.get("dot_number")
             try:
-                crash_rows = await pool.fetch(
-                    """
-                    SELECT *
-                    FROM crashes
-                    WHERE dot_number = ANY($1)
-                    ORDER BY report_date DESC NULLS LAST
-                    """,
-                    unique_dot_strs,
-                )
-                crash_map: dict[str, list[dict]] = {}
-                for cr in crash_rows:
-                    d = _crash_row_to_dict(cr)
-                    dn = d.get("dot_number", "")
-                    if dn:
-                        crash_map.setdefault(str(dn).strip(), []).append(d)
+                cdn_int = int(cdn) if cdn is not None else None
+            except (TypeError, ValueError):
+                cdn_int = None
+            carrier["inspections"] = insp_map.get(cdn_int, []) if cdn_int is not None else []
 
-                for carrier in carrier_dicts:
-                    cdn = carrier.get("dot_number")
-                    cdn_str = str(cdn).strip() if cdn is not None else ""
-                    if cdn_str and cdn_str in crash_map:
-                        carrier["crashes"] = crash_map[cdn_str]
-                    else:
-                        carrier["crashes"] = []
-            except Exception as _e:
-                print(f"[DB] Warning: failed to batch-fetch crashes: {_e}")
-                for carrier in carrier_dicts:
-                    carrier.setdefault("crashes", [])
-        else:
-            for carrier in carrier_dicts:
-                carrier.setdefault("crashes", [])
+        # Attach crashes
+        crash_map: dict[str, list[dict]] = {}
+        for cr in crash_rows_batch:
+            d = _crash_row_to_dict(cr)
+            dn = str(d.get("dot_number", "")).strip()
+            if dn:
+                crash_map.setdefault(dn, []).append(d)
+        for carrier in carrier_dicts:
+            cdn = carrier.get("dot_number")
+            cdn_str = str(cdn).strip() if cdn is not None else ""
+            carrier["crashes"] = crash_map.get(cdn_str, []) if cdn_str else []
 
         return {
             "data": carrier_dicts,
@@ -2838,22 +2926,32 @@ async def fetch_inspection_by_id(unique_id: int) -> dict | None:
         print(f"[DB] Error fetching inspection {unique_id}: {e}")
         return None
 
-async def fetch_inspections_by_dot(dot_number: int) -> list[dict]:
-    """Fetch all inspections for a specific DOT number."""
+async def fetch_inspections_by_dot(
+    dot_number: int, limit: int = 10, offset: int = 0,
+) -> dict:
+    """Fetch paginated inspections for a DOT number with total count."""
     pool = get_pool()
     try:
-        rows = await pool.fetch(
-            """
-            SELECT * FROM inspections
-            WHERE dot_number = $1
-            ORDER BY insp_date DESC
-            """,
-            dot_number,
+        rows, count_row = await asyncio.gather(
+            pool.fetch(
+                """SELECT * FROM inspections
+                   WHERE dot_number = $1
+                   ORDER BY insp_date DESC
+                   LIMIT $2 OFFSET $3""",
+                dot_number, limit, offset,
+            ),
+            pool.fetchrow(
+                "SELECT COUNT(*) AS cnt FROM inspections WHERE dot_number = $1",
+                dot_number,
+            ),
         )
-        return [_inspection_row_to_dict(row) for row in rows]
+        return {
+            "data": [_inspection_row_to_dict(row) for row in rows],
+            "total": count_row["cnt"] if count_row else 0,
+        }
     except Exception as e:
         print(f"[DB] Error fetching inspections for DOT {dot_number}: {e}")
-        return []
+        return {"data": [], "total": 0}
 
 
 # ── Crashes ──────────────────────────────────────────────────────────────────
@@ -3047,22 +3145,33 @@ async def fetch_crash_by_report(report_number: str) -> dict | None:
         return None
 
 
-async def fetch_crashes_by_dot(dot_number: str) -> list[dict]:
-    """Fetch all crashes for a specific DOT number."""
+async def fetch_crashes_by_dot(
+    dot_number: str, limit: int = 10, offset: int = 0,
+) -> dict:
+    """Fetch paginated crashes for a DOT number with total count."""
     pool = get_pool()
+    dn = dot_number.strip()
     try:
-        rows = await pool.fetch(
-            """
-            SELECT * FROM crashes
-            WHERE dot_number = $1
-            ORDER BY report_date DESC
-            """,
-            dot_number.strip(),
+        rows, count_row = await asyncio.gather(
+            pool.fetch(
+                """SELECT * FROM crashes
+                   WHERE dot_number = $1
+                   ORDER BY report_date DESC
+                   LIMIT $2 OFFSET $3""",
+                dn, limit, offset,
+            ),
+            pool.fetchrow(
+                "SELECT COUNT(*) AS cnt FROM crashes WHERE dot_number = $1",
+                dn,
+            ),
         )
-        return [_crash_row_to_dict(row) for row in rows]
+        return {
+            "data": [_crash_row_to_dict(row) for row in rows],
+            "total": count_row["cnt"] if count_row else 0,
+        }
     except Exception as e:
         print(f"[DB] Error fetching crashes for DOT {dot_number}: {e}")
-        return []
+        return {"data": [], "total": 0}
 
 
 async def fetch_safety_by_dot(dot_number: str) -> dict | None:
