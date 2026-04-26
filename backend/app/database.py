@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS inspections (
 CREATE TABLE IF NOT EXISTS crashes (
     report_number TEXT,
     report_seq_no INTEGER,
-    dot_number TEXT,
+    dot_number INTEGER,
     report_date DATE,
     report_state TEXT,
     fatalities INTEGER,
@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS crashes (
     vehicle_id_number TEXT,
     vehicle_license_number TEXT,
     vehicle_license_state TEXT,
+    severity_weight DOUBLE PRECISION,
+    time_weight DOUBLE PRECISION,
     citation_issued_desc TEXT,
     seq_num INTEGER,
     not_preventable BOOLEAN
@@ -437,6 +439,7 @@ CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_status_code ON carriers(status_code);
 CREATE INDEX IF NOT EXISTS idx_carriers_legal_name ON carriers(legal_name);
+CREATE INDEX IF NOT EXISTS idx_carriers_status_lname ON carriers(status_code, legal_name);
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
@@ -1112,7 +1115,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_crash_count_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number::text"
+            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number"
         )
 
     # Injuries filter (from crashes table: sum of injuries per carrier)
@@ -1132,7 +1135,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_injuries_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number::text"
+            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number"
         )
 
     # Fatalities filter (from crashes table: sum of fatalities per carrier)
@@ -1152,7 +1155,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_fatalities_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number::text"
+            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number"
         )
 
     # Towaway filter (from crashes table: count of tow_away=true per carrier)
@@ -1172,7 +1175,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_toway_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number::text"
+            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number"
         )
 
     # ------------------------------------------------------------------
@@ -1535,108 +1538,45 @@ async def fetch_carriers(filters: dict) -> dict:
                 )
             filtered_count = count_row["cnt"] if count_row else 0
 
-        # ── Parallel batch-fetch: insurance, inspections, crashes ────────
+        # ── Build carrier dicts + insurance batch-fetch ──────────────────
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
 
-        # Prepare keys for all three fetches
+        # Inspections & crashes are fetched on-demand via
+        # /api/inspections/by-dot and /api/crashes/by-dot when the user
+        # opens the detail panel.  Batch-fetching them here for 500
+        # carriers slowed the list endpoint significantly.
+
+        # Batch-fetch insurance history (lightweight — table is small)
         docket_keys = []
-        dot_numbers_int: list[int] = []
         for row in rows:
             d = dict(row)
             mc = d.get("mc_number")
             docket_keys.append(f"MC{mc}" if mc else "")
-            dn = d.get("dot_number")
-            if dn is not None:
-                try:
-                    dot_numbers_int.append(int(dn))
-                except (TypeError, ValueError):
-                    pass
 
         unique_docket_keys = list(set(k for k in docket_keys if k))
-        unique_dots_int = list(set(dot_numbers_int))
-
-        # Fire all three batch fetches in parallel
-        async def _fetch_insurance():
-            if not unique_docket_keys:
-                return []
-            return await pool.fetch(
-                """SELECT docket_number, ins_type_desc, max_cov_amount,
-                          underl_lim_amount, policy_no, effective_date,
-                          ins_form_code, name_company, trans_date,
-                          cancl_effective_date
-                   FROM insurance_history
-                   WHERE docket_number = ANY($1)
-                   ORDER BY effective_date DESC""",
-                unique_docket_keys,
-            )
-
-        async def _fetch_insp_batch():
-            if not unique_dots_int:
-                return []
-            return await pool.fetch(
-                """SELECT * FROM inspections
-                   WHERE dot_number = ANY($1)
-                   ORDER BY insp_date DESC NULLS LAST""",
-                unique_dots_int,
-            )
-
-        async def _fetch_crash_batch():
-            if not unique_dots_int:
-                return []
-            dot_strs = [str(d) for d in unique_dots_int]
-            return await pool.fetch(
-                """SELECT * FROM crashes
-                   WHERE dot_number = ANY($1)
-                   ORDER BY report_date DESC NULLS LAST""",
-                dot_strs,
-            )
-
-        ih_rows, insp_rows_batch, crash_rows_batch = await asyncio.gather(
-            _fetch_insurance(),
-            _fetch_insp_batch(),
-            _fetch_crash_batch(),
-        )
-
-        # Attach insurance history
-        if ih_rows:
-            ih_map: dict[str, list[dict]] = {}
-            for ih_row in ih_rows:
-                dk = ih_row["docket_number"]
-                ih_map.setdefault(dk, []).append(dict(ih_row))
-            for i, carrier in enumerate(carrier_dicts):
-                dk = docket_keys[i]
-                if dk and dk in ih_map:
-                    carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
-
-        # Attach inspections
-        insp_map: dict[int, list[dict]] = {}
-        for ir in insp_rows_batch:
-            d = _inspection_row_to_dict(ir)
-            dn = d.get("dot_number")
-            if dn is None:
-                continue
+        if unique_docket_keys:
             try:
-                insp_map.setdefault(int(dn), []).append(d)
-            except (TypeError, ValueError):
-                continue
-        for carrier in carrier_dicts:
-            cdn = carrier.get("dot_number")
-            try:
-                cdn_int = int(cdn) if cdn is not None else None
-            except (TypeError, ValueError):
-                cdn_int = None
-            carrier["inspections"] = insp_map.get(cdn_int, []) if cdn_int is not None else []
-
-        # Attach crashes (crashes.dot_number is TEXT)
-        crash_map: dict[str, list[dict]] = {}
-        for cr in crash_rows_batch:
-            d = _crash_row_to_dict(cr)
-            dn = str(d.get("dot_number", "")).strip()
-            if dn:
-                crash_map.setdefault(dn, []).append(d)
-        for carrier in carrier_dicts:
-            cdn = str(carrier.get("dot_number", "")).strip()
-            carrier["crashes"] = crash_map.get(cdn, []) if cdn else []
+                ih_rows = await pool.fetch(
+                    """SELECT docket_number, ins_type_desc, max_cov_amount,
+                              underl_lim_amount, policy_no, effective_date,
+                              ins_form_code, name_company, trans_date,
+                              cancl_effective_date
+                       FROM insurance_history
+                       WHERE docket_number = ANY($1::text[])
+                       ORDER BY effective_date DESC""",
+                    unique_docket_keys,
+                )
+                if ih_rows:
+                    ih_map: dict[str, list[dict]] = {}
+                    for ih_row in ih_rows:
+                        dk = ih_row["docket_number"]
+                        ih_map.setdefault(dk, []).append(dict(ih_row))
+                    for i, carrier in enumerate(carrier_dicts):
+                        dk = docket_keys[i]
+                        if dk and dk in ih_map:
+                            carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
+            except Exception as e:
+                print(f"[DB] Error in _fetch_insurance: {e}")
 
         return {
             "data": carrier_dicts,
@@ -2422,6 +2362,10 @@ def _crash_row_to_dict(row) -> dict:
     report_date = d.get("report_date")
     if report_date is not None:
         d["report_date"] = str(report_date)
+    for float_col in ("severity_weight", "time_weight"):
+        val = d.get(float_col)
+        if val is not None and isinstance(val, float) and math.isnan(val):
+            d[float_col] = None
     return d
 
 
@@ -2799,9 +2743,15 @@ async def fetch_crashes(filters: dict) -> dict:
     idx = 1
 
     if filters.get("dot_number"):
-        conditions.append(f"dot_number = ${idx}")
-        params.append(filters["dot_number"].strip())
-        idx += 1
+        dot_val = filters["dot_number"].strip()
+        try:
+            conditions.append(f"dot_number = ${idx}")
+            params.append(int(dot_val))
+            idx += 1
+        except ValueError:
+            conditions.append(f"dot_number::text = ${idx}")
+            params.append(dot_val)
+            idx += 1
 
     if filters.get("report_number"):
         conditions.append(f"report_number ILIKE ${idx}")
@@ -2969,7 +2919,10 @@ async def fetch_crashes_by_dot(
 ) -> dict:
     """Fetch paginated crashes for a DOT number with total count."""
     pool = get_pool()
-    dn = dot_number.strip()
+    try:
+        dn_int = int(dot_number.strip())
+    except (TypeError, ValueError):
+        return {"data": [], "total": 0}
     try:
         rows, count_row = await asyncio.gather(
             pool.fetch(
@@ -2977,11 +2930,11 @@ async def fetch_crashes_by_dot(
                    WHERE dot_number = $1
                    ORDER BY report_date DESC
                    LIMIT $2 OFFSET $3""",
-                dn, limit, offset,
+                dn_int, limit, offset,
             ),
             pool.fetchrow(
                 "SELECT COUNT(*) AS cnt FROM crashes WHERE dot_number = $1",
-                dn,
+                dn_int,
             ),
         )
         return {
