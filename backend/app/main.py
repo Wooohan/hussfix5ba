@@ -1012,10 +1012,21 @@ async def api_get_inspection_detail(unique_id: int):
     return JSONResponse(status_code=404, content={"error": "Inspection not found"})
 
 @app.get("/api/inspections/by-dot/{dot_number}")
-async def api_get_inspections_by_dot(dot_number: int):
-    """Get all inspections for a specific DOT number."""
-    inspections = await fetch_inspections_by_dot(dot_number)
-    return {"success": True, "dot_number": dot_number, "inspections": inspections, "count": len(inspections)}
+async def api_get_inspections_by_dot(
+    dot_number: int,
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Get paginated inspections for a specific DOT number."""
+    result = await fetch_inspections_by_dot(dot_number, limit=limit, offset=offset)
+    return {
+        "success": True,
+        "dot_number": dot_number,
+        "inspections": result["data"],
+        "total": result["total"],
+        "limit": limit,
+        "offset": offset,
+    }
 
 # ── Crashes endpoints ────────────────────────────────────────────────────────
 
@@ -1092,10 +1103,21 @@ async def api_get_crashes_dashboard_stats():
     return stats
 
 @app.get("/api/crashes/by-dot/{dot_number}")
-async def api_get_crashes_by_dot(dot_number: str):
-    """Get all crashes for a specific DOT number."""
-    crashes = await fetch_crashes_by_dot(dot_number)
-    return {"success": True, "dot_number": dot_number, "crashes": crashes, "count": len(crashes)}
+async def api_get_crashes_by_dot(
+    dot_number: str,
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Get paginated crashes for a specific DOT number."""
+    result = await fetch_crashes_by_dot(dot_number, limit=limit, offset=offset)
+    return {
+        "success": True,
+        "dot_number": dot_number,
+        "crashes": result["data"],
+        "total": result["total"],
+        "limit": limit,
+        "offset": offset,
+    }
 
 @app.get("/api/crashes/{report_number}")
 async def api_get_crash_detail(report_number: str):
