@@ -20,175 +20,81 @@ _DASHBOARD_CACHE_TTL = 300  # 5 minutes
 
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
--- NOTE: carriers table is populated from the Company Census File (az4n-8mr2)
--- with ~4.4M records.  The table already exists in the database so we do NOT
--- try to CREATE it here.  The schema is managed externally.
+-- carriers table is populated externally (~4.4M records).
+-- Schema managed externally; CREATE IF NOT EXISTS for reference only.
 
 CREATE TABLE IF NOT EXISTS carriers (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    mcs150_date text,
-    add_date text,
-    status_code text,
-    dot_number text,
-    dun_bradstreet_no text,
-    phy_omc_region text,
-    safety_inv_terr text,
-    carrier_operation text,
-    business_org_id text,
-    mcs150_mileage text,
-    mcs150_mileage_year text,
-    mcs151_mileage text,
-    total_cars text,
-    mcs150_update_code_id text,
-    prior_revoke_flag text,
-    prior_revoke_dot_number text,
-    phone text,
-    fax text,
-    cell_phone text,
-    company_officer_1 text,
-    company_officer_2 text,
-    business_org_desc text,
-    truck_units text,
-    power_units integer,
-    bus_units text,
-    fleetsize text,
-    review_id text,
-    recordable_crash_rate text,
-    mail_nationality_indicator text,
-    phy_nationality_indicator text,
-    phy_barrio text,
-    mail_barrio text,
-    carship text,
-    docket1prefix text,
-    docket1 text,
-    docket2prefix text,
-    docket2 text,
-    docket3prefix text,
-    docket3 text,
-    pointnum text,
-    total_intrastate_drivers text,
-    mcsipstep text,
-    mcsipdate text,
-    hm_ind text,
-    interstate_beyond_100_miles text,
-    interstate_within_100_miles text,
-    intrastate_beyond_100_miles text,
-    intrastate_within_100_miles text,
-    total_cdl text,
-    total_drivers integer,
-    avg_drivers_leased_per_month text,
-    classdef text,
-    legal_name text,
-    dba_name text,
-    phy_street text,
-    phy_city text,
-    phy_country text,
-    phy_state text,
-    phy_zip text,
-    phy_cnty text,
-    carrier_mailing_street text,
-    carrier_mailing_state text,
-    carrier_mailing_city text,
-    carrier_mailing_country text,
-    carrier_mailing_zip text,
-    carrier_mailing_cnty text,
-    carrier_mailing_und_date text,
-    driver_inter_total text,
-    email_address text,
-    review_type text,
-    review_date text,
-    safety_rating text,
-    safety_rating_date text,
-    undeliv_phy text,
-    crgo_genfreight text,
-    crgo_household text,
-    crgo_metalsheet text,
-    crgo_motoveh text,
-    crgo_drivetow text,
-    crgo_logpole text,
-    crgo_bldgmat text,
-    crgo_mobilehome text,
-    crgo_machlrg text,
-    crgo_produce text,
-    crgo_liqgas text,
-    crgo_intermodal text,
-    crgo_passengers text,
-    crgo_oilfield text,
-    crgo_livestock text,
-    crgo_grainfeed text,
-    crgo_coalcoke text,
-    crgo_meat text,
-    crgo_garbage text,
-    crgo_usmail text,
-    crgo_chem text,
-    crgo_drybulk text,
-    crgo_coldfood text,
-    crgo_beverages text,
-    crgo_paperprod text,
-    crgo_utility text,
-    crgo_farmsupp text,
-    crgo_construct text,
-    crgo_waterwell text,
-    crgo_cargoothr text,
-    crgo_cargoothr_desc text,
-    owntruck text,
-    owntract text,
-    owntrail text,
-    owncoach text,
-    ownschool_1_8 text,
-    ownschool_9_15 text,
-    ownschool_16 text,
-    ownbus_16 text,
-    ownvan_1_8 text,
-    ownvan_9_15 text,
-    ownlimo_1_8 text,
-    ownlimo_9_15 text,
-    ownlimo_16 text,
-    trmtruck text,
-    trmtract text,
-    trmtrail text,
-    trmcoach text,
-    trmschool_1_8 text,
-    trmschool_9_15 text,
-    trmschool_16 text,
-    trmbus_16 text,
-    trmvan_1_8 text,
-    trmvan_9_15 text,
-    trmlimo_1_8 text,
-    trmlimo_9_15 text,
-    trmlimo_16 text,
-    trptruck text,
-    trptract text,
-    trptrail text,
-    trpcoach text,
-    trpschool_1_8 text,
-    trpschool_9_15 text,
-    trpschool_16 text,
-    trpbus_16 text,
-    trpvan_1_8 text,
-    trpvan_9_15 text,
-    trplimo_1_8 text,
-    trplimo_9_15 text,
-    trplimo_16 text,
-    docket1_status_code text,
-    docket2_status_code text,
-    docket3_status_code text
+    dot_number              BIGINT,
+    mc_number               BIGINT,
+    dockets                 BIGINT,
+    legal_name              CHARACTER VARYING,
+    dba_name                CHARACTER VARYING,
+    status_code             CHARACTER(1),
+    carrier_operation       CHARACTER(1),
+    classdef                CHARACTER VARYING,
+    hm_ind                  BOOLEAN,
+    add_date                DATE,
+    mcs150_date             DATE,
+    mcs150_mileage          BIGINT,
+    mcs150_mileage_year     INTEGER,
+    total_cars              INTEGER,
+    truck_units             INTEGER,
+    power_units             INTEGER,
+    fleetsize               INTEGER,
+    total_drivers           INTEGER,
+    total_intrastate_drivers INTEGER,
+    total_cdl               INTEGER,
+    avg_drivers_leased_per_month NUMERIC,
+    phone                   CHARACTER VARYING,
+    fax                     CHARACTER VARYING,
+    cell_phone              CHARACTER VARYING,
+    email_address           CHARACTER VARYING,
+    company_officer_1       CHARACTER VARYING,
+    company_officer_2       CHARACTER VARYING,
+    phy_street              CHARACTER VARYING,
+    phy_city                CHARACTER VARYING,
+    phy_state               CHARACTER VARYING,
+    phy_zip                 CHARACTER VARYING,
+    phy_country             CHARACTER VARYING,
+    phy_cnty                CHARACTER VARYING,
+    phy_nationality_indicator CHARACTER VARYING,
+    carrier_mailing_street  CHARACTER VARYING,
+    carrier_mailing_city    CHARACTER VARYING,
+    carrier_mailing_state   CHARACTER VARYING,
+    carrier_mailing_zip     CHARACTER VARYING,
+    carrier_mailing_country CHARACTER VARYING,
+    carrier_mailing_cnty    CHARACTER VARYING,
+    dun_bradstreet_no       CHARACTER VARYING,
+    driver_inter_total      CHARACTER VARYING,
+    docket1_status_code     CHARACTER VARYING,
+    docket2_status_code     CHARACTER VARYING,
+    docket3_status_code     CHARACTER VARYING,
+    prior_revoke_flag       CHARACTER VARYING,
+    prior_revoke_dot_number CHARACTER VARYING,
+    mcsipdate               CHARACTER VARYING,
+    interstate_beyond_100_miles  BOOLEAN,
+    interstate_within_100_miles  BOOLEAN,
+    intrastate_beyond_100_miles  BOOLEAN,
+    intrastate_within_100_miles  BOOLEAN,
+    cargo                   JSONB,
+    other_dockets           JSONB,
+    equipment               JSONB
 );
 
 -- ── Insurance history ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS insurance_history (
     id SERIAL PRIMARY KEY,
-    docket_number VARCHAR(20),
+    docket_number CHARACTER VARYING(20),
     dot_number TEXT,
-    ins_form_code VARCHAR(10),
-    ins_type_desc VARCHAR(50),
-    name_company VARCHAR(100),
-    policy_no VARCHAR(50),
-    trans_date VARCHAR(15),
-    underl_lim_amount VARCHAR(15),
-    max_cov_amount VARCHAR(15),
-    effective_date VARCHAR(15),
-    cancl_effective_date VARCHAR(15)
+    ins_form_code CHARACTER VARYING(10),
+    ins_type_desc CHARACTER VARYING(50),
+    name_company CHARACTER VARYING(100),
+    policy_no CHARACTER VARYING(50),
+    trans_date CHARACTER VARYING(15),
+    underl_lim_amount CHARACTER VARYING(15),
+    max_cov_amount CHARACTER VARYING(15),
+    effective_date CHARACTER VARYING(15),
+    cancl_effective_date CHARACTER VARYING(15)
 );
 
 -- ── Inspections ─────────────────────────────────────────────────────────────
@@ -527,10 +433,12 @@ VALUES ('1', 'Admin User', 'wooohan3@gmail.com', 'admin', 'Enterprise', 100000, 
 ON CONFLICT (email) DO NOTHING;
 
 -- ── Performance indexes ─────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_status_code ON carriers(status_code);
+CREATE INDEX IF NOT EXISTS idx_carriers_legal_name ON carriers(legal_name);
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_dot_number_bigint ON carriers ((dot_number::bigint)) WHERE dot_number ~ '^[0-9]+$';
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_dot ON insurance_history(dot_number);
 CREATE INDEX IF NOT EXISTS idx_safety_dot_number ON safety(dot_number);
@@ -564,8 +472,7 @@ def get_pool() -> asyncpg.Pool:
 async def upsert_carrier(record: dict) -> bool:
     """Upsert a carrier using Census File column names.
 
-    The carriers table is now the Company Census File schema.
-    We upsert on dot_number (bigint) which is the natural key.
+    The carriers table uses dot_number (bigint) as the natural key.
     """
     pool = get_pool()
     dot = record.get("dot_number")
@@ -580,16 +487,14 @@ async def upsert_carrier(record: dict) -> bool:
                 carrier_mailing_street, carrier_mailing_city, carrier_mailing_state, carrier_mailing_zip,
                 mcs150_date, mcs150_mileage, mcs150_mileage_year,
                 classdef, carrier_operation, hm_ind,
-                dun_bradstreet_no, safety_rating, safety_rating_date,
-                status_code, carship, docket1prefix, docket1
+                dun_bradstreet_no, status_code, mc_number
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19,
                 $20, $21, $22,
-                $23, $24, $25,
-                $26, $27, $28, $29
+                $23, $24, $25
             )
             ON CONFLICT (dot_number) DO UPDATE SET
                 legal_name = EXCLUDED.legal_name,
@@ -608,12 +513,8 @@ async def upsert_carrier(record: dict) -> bool:
                 carrier_operation = EXCLUDED.carrier_operation,
                 hm_ind = EXCLUDED.hm_ind,
                 dun_bradstreet_no = EXCLUDED.dun_bradstreet_no,
-                safety_rating = EXCLUDED.safety_rating,
-                safety_rating_date = EXCLUDED.safety_rating_date,
                 status_code = EXCLUDED.status_code,
-                carship = EXCLUDED.carship,
-                docket1prefix = EXCLUDED.docket1prefix,
-                docket1 = EXCLUDED.docket1
+                mc_number = EXCLUDED.mc_number
             """,
             int(dot),
             record.get("legal_name"),
@@ -638,12 +539,8 @@ async def upsert_carrier(record: dict) -> bool:
             record.get("carrier_operation"),
             record.get("hm_ind"),
             record.get("dun_bradstreet_no", record.get("duns_number")),
-            record.get("safety_rating"),
-            record.get("safety_rating_date"),
             record.get("status_code"),
-            record.get("carship"),
-            record.get("docket1prefix"),
-            record.get("docket1"),
+            record.get("mc_number"),
         )
         return True
     except Exception as e:
@@ -778,37 +675,37 @@ def _format_insurance_history(raw_filings) -> list[dict]:
         })
     return results
 
-_CARGO_COL_MAP = {
-    "crgo_genfreight": "General Freight",
-    "crgo_household": "Household Goods",
-    "crgo_metalsheet": "Metal/Sheets/Coils",
-    "crgo_motoveh": "Motor Vehicles",
-    "crgo_drivetow": "Drive-Away/Tow-Away",
-    "crgo_logpole": "Logs/Poles/Lumber",
-    "crgo_bldgmat": "Building Materials",
-    "crgo_mobilehome": "Mobile Homes",
-    "crgo_machlrg": "Machinery/Large Objects",
-    "crgo_produce": "Fresh Produce",
-    "crgo_liqgas": "Liquids/Gases",
-    "crgo_intermodal": "Intermodal Containers",
-    "crgo_passengers": "Passengers",
-    "crgo_oilfield": "Oilfield Equipment",
-    "crgo_livestock": "Livestock",
-    "crgo_grainfeed": "Grain/Feed/Hay",
-    "crgo_coalcoke": "Coal/Coke",
-    "crgo_meat": "Meat",
-    "crgo_garbage": "Garbage/Refuse",
-    "crgo_usmail": "US Mail",
-    "crgo_chem": "Chemicals",
-    "crgo_drybulk": "Dry Bulk",
-    "crgo_coldfood": "Refrigerated Food",
-    "crgo_beverages": "Beverages",
-    "crgo_paperprod": "Paper Products",
-    "crgo_utility": "Utilities",
-    "crgo_farmsupp": "Farm Supplies",
-    "crgo_construct": "Construction",
-    "crgo_waterwell": "Water Well",
-    "crgo_cargoothr": "Other",
+_CARGO_LABEL_MAP = {
+    "General Freight": "General Freight",
+    "Household Goods": "Household Goods",
+    "Metal Sheets": "Metal Sheets",
+    "Motor Vehicles": "Motor Vehicles",
+    "Drive/Tow away": "Drive/Tow away",
+    "Logs, Poles, Beams, Lumber": "Logs, Poles, Beams, Lumber",
+    "Building Materials": "Building Materials",
+    "Mobile Homes": "Mobile Homes",
+    "Machinery, Large Objects": "Machinery, Large Objects",
+    "Fresh Produce": "Fresh Produce",
+    "Liquids/Gases": "Liquids/Gases",
+    "Intermodal Containers": "Intermodal Containers",
+    "Passengers": "Passengers",
+    "Oilfield Equipment": "Oilfield Equipment",
+    "Livestock": "Livestock",
+    "Grain, Feed, Hay": "Grain, Feed, Hay",
+    "Coal/Coke": "Coal/Coke",
+    "Meat": "Meat",
+    "Garbage/Refuse": "Garbage/Refuse",
+    "US Mail": "US Mail",
+    "Chemicals": "Chemicals",
+    "Commodities Dry Bulk": "Commodities Dry Bulk",
+    "Refrigerated Food": "Refrigerated Food",
+    "Beverages": "Beverages",
+    "Paper Products": "Paper Products",
+    "Utilities": "Utilities",
+    "Agricultural/Farm Supplies": "Agricultural/Farm Supplies",
+    "Construction": "Construction",
+    "Water Well": "Water Well",
+    "Other": "Other",
 }
 
 _CARRIER_OP_MAP = {
@@ -823,30 +720,20 @@ _STATUS_CODE_MAP = {
     "P": "Pending",
 }
 
-_CARSHIP_MAP = {
-    "C": "CARRIER",
-    "B": "BROKER",
-    "R": "REGISTRANT",
-    "F": "FREIGHT FORWARDER",
-    "I": "IEP (Intermodal Equipment Provider)",
-    "S": "SHIPPER",
-    "T": "CARGO TANK FACILITY",
-}
-
 def _build_mc_number(d: dict) -> str:
-    """Build a display MC/MX/FF number from all docket fields.
+    """Build a display MC number from the mc_number field.
 
-    Returns a comma-separated list of all docket numbers, e.g.
-    'MC-1418760, FF-26167'.
+    mc_number is now a bigint column. Also appends any other_dockets entries.
     """
+    mc = d.get("mc_number")
     parts = []
-    for pfx_key, num_key in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
-        prefix = d.get(pfx_key) or ""
-        number = d.get(num_key) or ""
-        if prefix and number:
-            parts.append(f"{prefix}-{number}")
-        elif number:
-            parts.append(number)
+    if mc:
+        parts.append(f"MC-{mc}")
+    other = d.get("other_dockets")
+    if other and isinstance(other, list):
+        for od in other:
+            if od:
+                parts.append(str(od))
     return ", ".join(parts)
 
 def _build_address(street: str, city: str, state: str, zipcode: str, country: str = "") -> str:
@@ -856,45 +743,35 @@ def _build_address(street: str, city: str, state: str, zipcode: str, country: st
         addr = f"{addr}, {country}" if addr else country
     return addr
 
-def _parse_carship(raw: str) -> str:
-    """Convert semicolon-separated carship codes to labels."""
-    if not raw:
-        return ""
-    codes = [c.strip() for c in raw.split(";")]
-    labels = [_CARSHIP_MAP.get(c, c) for c in codes]
-    return " / ".join(labels)
-
 def _build_cargo_list(d: dict) -> list[str]:
-    """Build a list of human-readable cargo types from crgo_* columns."""
+    """Build a list of human-readable cargo types from cargo JSONB column."""
+    cargo = d.get("cargo")
+    if not cargo or not isinstance(cargo, dict):
+        return []
     result = []
-    for col, label in _CARGO_COL_MAP.items():
-        val = d.get(col)
-        if val and val.strip().upper() == "X":
+    other_desc = cargo.get("crgo_cargoothr_desc")
+    for key, val in cargo.items():
+        if key == "crgo_cargoothr_desc":
+            continue
+        label = _CARGO_LABEL_MAP.get(key, key)
+        if val and str(val).strip().upper() == "X":
             result.append(label)
-    other_desc = d.get("crgo_cargoothr_desc")
-    if other_desc and other_desc.strip():
-        # Replace generic "Other" with the description if present
+    if other_desc and str(other_desc).strip():
         if "Other" in result:
             result.remove("Other")
-        result.append(other_desc.strip())
+        result.append(str(other_desc).strip())
     return result
 
-def _format_mcs150_date(raw: str) -> str:
-    """Convert Census mcs150_date (e.g. '20130729 2240') to MM/DD/YYYY."""
+def _format_mcs150_date(raw) -> str:
+    """Format mcs150_date (now a date type) to MM/DD/YYYY."""
     if not raw:
         return ""
-    date_part = raw.strip().split()[0] if raw else ""
-    if len(date_part) == 8 and date_part.isdigit():
-        return f"{date_part[4:6]}/{date_part[6:8]}/{date_part[:4]}"
-    return raw
+    if hasattr(raw, 'strftime'):
+        return raw.strftime("%m/%d/%Y")
+    return str(raw)
 
 def _carrier_row_to_dict(row) -> dict:
-    """Map a Census-schema carriers row to the API response format.
-
-    The API response keeps the same field names the frontend expects
-    (mc_number, dot_number, email, phone, physical_address, etc.) so the
-    frontend needs minimal changes.
-    """
+    """Map a Census-schema carriers row to the API response format."""
     d = dict(row)
 
     mc_number = _build_mc_number(d)
@@ -916,26 +793,24 @@ def _carrier_row_to_dict(row) -> dict:
     )
 
     cargo_carried = _build_cargo_list(d)
-    op_code = d.get("carrier_operation") or ""
+    op_code = (d.get("carrier_operation") or "").strip()
     carrier_operation_list = [_CARRIER_OP_MAP.get(op_code, op_code)] if op_code else []
 
     classdef = d.get("classdef") or ""
     operation_classification = [c.strip() for c in classdef.split(";")] if classdef else []
 
-    status_code = d.get("status_code") or ""
+    status_code = (d.get("status_code") or "").strip()
     status_label = _STATUS_CODE_MAP.get(status_code, status_code)
 
-    # Operating Authority status (from docket1_status_code)
-    docket_status_code = d.get("docket1_status_code") or ""
+    docket_status_code = (d.get("docket1_status_code") or "").strip()
     _DOCKET_STATUS_MAP = {"A": "AUTHORIZED", "I": "NOT AUTHORIZED", "P": "PENDING"}
     docket_status = _DOCKET_STATUS_MAP.get(docket_status_code, "NOT AUTHORIZED")
 
-    mcs150_date = _format_mcs150_date(d.get("mcs150_date") or "")
-    mileage = d.get("mcs150_mileage") or ""
-    mileage_year = d.get("mcs150_mileage_year") or ""
-    mcs150_mileage = f"{mileage} ({mileage_year})" if mileage and mileage_year else mileage
+    mcs150_date = _format_mcs150_date(d.get("mcs150_date"))
+    mileage = d.get("mcs150_mileage")
+    mileage_year = d.get("mcs150_mileage_year")
+    mcs150_mileage = f"{mileage} ({mileage_year})" if mileage and mileage_year else str(mileage or "")
 
-    # Build operating-territory flags
     territory = []
     if d.get("interstate_beyond_100_miles"):
         territory.append("Interstate (>100 mi)")
@@ -946,15 +821,22 @@ def _carrier_row_to_dict(row) -> dict:
     if d.get("intrastate_within_100_miles"):
         territory.append("Intrastate (<100 mi)")
 
-    entity_type = _parse_carship(d.get("carship") or "")
+    add_date_raw = d.get("add_date")
+    add_date_str = add_date_raw.strftime("%m/%d/%Y") if hasattr(add_date_raw, 'strftime') else str(add_date_raw or "")
+
+    hm_val = d.get("hm_ind")
+    hm_str = "Y" if hm_val is True else ("N" if hm_val is False else "")
+
+    equipment = d.get("equipment")
+    equipment_dict = equipment if isinstance(equipment, dict) else {}
 
     result = {
-        "id": str(d.get("id", "")),
+        "id": dot_number,
         "mc_number": mc_number,
         "dot_number": dot_number,
         "legal_name": d.get("legal_name") or "",
         "dba_name": d.get("dba_name") or "",
-        "entity_type": entity_type,
+        "entity_type": "",
         "status": status_label,
         "status_code": status_code,
         "authority_status": docket_status,
@@ -971,18 +853,18 @@ def _carrier_row_to_dict(row) -> dict:
         "operation_classification": operation_classification,
         "carrier_operation": carrier_operation_list,
         "cargo_carried": cargo_carried,
-        "hm_ind": d.get("hm_ind") or "",
+        "hm_ind": hm_str,
         "duns_number": d.get("dun_bradstreet_no") or "",
-        "safety_rating": d.get("safety_rating") or "",
-        "safety_rating_date": d.get("safety_rating_date") or "",
+        "safety_rating": "",
+        "safety_rating_date": "",
         "operating_territory": territory,
         "company_officer_1": d.get("company_officer_1") or "",
         "company_officer_2": d.get("company_officer_2") or "",
         "fleetsize": d.get("fleetsize") or "",
-        "add_date": d.get("add_date") or "",
+        "add_date": add_date_str,
         "truck_units": d.get("truck_units") or "",
-        "bus_units": d.get("bus_units") or "",
-        # JSONB fields that no longer exist in Census data
+        "bus_units": "",
+        "equipment": equipment_dict,
         "basic_scores": None,
         "oos_rates": None,
         "insurance_policies": None,
@@ -990,10 +872,7 @@ def _carrier_row_to_dict(row) -> dict:
         "crashes": None,
     }
 
-    # Insurance history filings – populated separately via batch fetch
-    # in fetch_carriers() after this function returns.
     result["insurance_history_filings"] = []
-
     return result
 
 async def fetch_carriers(filters: dict) -> dict:
@@ -1030,47 +909,39 @@ async def fetch_carriers(filters: dict) -> dict:
 
     if filters.get("mc_number"):
         mc_raw = filters["mc_number"].strip().upper()
-        mc_prefix = ""
         mc_num = mc_raw
         for pfx in ("MC", "MX", "FF"):
             if mc_raw.startswith(pfx):
-                mc_prefix = pfx
                 mc_num = mc_raw[len(pfx):].lstrip("-").strip()
                 break
-        docket_clauses = []
-        if mc_prefix:
-            for dk_pfx, dk_num in [("docket1prefix", "docket1"), ("docket2prefix", "docket2"), ("docket3prefix", "docket3")]:
-                docket_clauses.append(f"(c.{dk_pfx} = ${idx} AND c.{dk_num} = ${idx + 1})")
-                params.extend([mc_prefix, mc_num])
-                idx += 2
-        else:
-            for dk_num in ["docket1", "docket2", "docket3"]:
-                docket_clauses.append(f"c.{dk_num} = ${idx}")
-                params.append(mc_num)
-                idx += 1
-        conditions.append(f"({' OR '.join(docket_clauses)})")
+        try:
+            mc_int = int(mc_num)
+            conditions.append(f"c.mc_number = ${idx}")
+            params.append(mc_int)
+            idx += 1
+        except ValueError:
+            conditions.append(f"c.mc_number::text = ${idx}")
+            params.append(mc_num)
+            idx += 1
 
     if filters.get("dot_number"):
         dot_val = filters["dot_number"].strip()
-        conditions.append(f"c.dot_number = ${idx}")
-        params.append(dot_val)
-        idx += 1
+        try:
+            dot_int = int(dot_val)
+            conditions.append(f"c.dot_number = ${idx}")
+            params.append(dot_int)
+            idx += 1
+        except ValueError:
+            conditions.append(f"c.dot_number::text = ${idx}")
+            params.append(dot_val)
+            idx += 1
 
     if filters.get("legal_name"):
         conditions.append(f"c.legal_name ILIKE ${idx}")
         params.append(f"%{filters['legal_name']}%")
         idx += 1
 
-    entity_type = filters.get("entity_type")
-    if entity_type:
-        et_upper = entity_type.upper()
-        reverse_map = {v: k for k, v in _CARSHIP_MAP.items()}
-        code = reverse_map.get(et_upper, et_upper)
-        # Use exact match (=) instead of ILIKE with wildcards to leverage
-        # B-Tree index on carship – exponentially faster on 4.4M rows.
-        conditions.append(f"c.carship = ${idx}")
-        params.append(code)
-        idx += 1
+    # entity_type filter removed (carship column no longer exists)
 
     active = filters.get("active")
     if active == "true":
@@ -1078,19 +949,18 @@ async def fetch_carriers(filters: dict) -> dict:
     elif active == "false":
         conditions.append("(c.docket1_status_code IS NULL OR c.docket1_status_code != 'A')")
 
-    # Years-in-business: compare the raw YYYYMMDD string directly so
-    # PG can use a B-tree index on add_date without per-row TO_DATE.
+    # Years-in-business: add_date is now DATE type — direct comparison
     if filters.get("years_in_business_min"):
         conditions.append(
-            f"c.add_date IS NOT NULL AND c.add_date != '' "
-            f"AND c.add_date <= to_char(CURRENT_DATE - make_interval(years => ${idx}), 'YYYYMMDD')"
+            f"c.add_date IS NOT NULL "
+            f"AND c.add_date <= CURRENT_DATE - make_interval(years => ${idx})"
         )
         params.append(int(filters["years_in_business_min"]))
         idx += 1
     if filters.get("years_in_business_max"):
         conditions.append(
-            f"c.add_date IS NOT NULL AND c.add_date != '' "
-            f"AND c.add_date >= to_char(CURRENT_DATE - make_interval(years => ${idx}), 'YYYYMMDD')"
+            f"c.add_date IS NOT NULL "
+            f"AND c.add_date >= CURRENT_DATE - make_interval(years => ${idx})"
         )
         params.append(int(filters["years_in_business_max"]))
         idx += 1
@@ -1137,23 +1007,24 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
 
     if filters.get("cargo"):
-        cargo = filters["cargo"]
-        if isinstance(cargo, str):
-            cargo = cargo.split(",")
-        reverse_cargo = {v: k for k, v in _CARGO_COL_MAP.items()}
+        cargo_filter = filters["cargo"]
+        if isinstance(cargo_filter, str):
+            cargo_filter = cargo_filter.split(",")
         or_clauses = []
-        for c in cargo:
-            col = reverse_cargo.get(c.strip())
-            if col:
-                or_clauses.append(f"c.{col} = 'X'")
+        for c in cargo_filter:
+            c_stripped = c.strip()
+            if c_stripped:
+                or_clauses.append(f"c.cargo ? ${idx}")
+                params.append(c_stripped)
+                idx += 1
         if or_clauses:
             conditions.append(f"({' OR '.join(or_clauses)})")
 
     hazmat = filters.get("hazmat")
     if hazmat == "true":
-        conditions.append("c.hm_ind = 'Y'")
+        conditions.append("c.hm_ind = TRUE")
     elif hazmat == "false":
-        conditions.append("(c.hm_ind IS NULL OR c.hm_ind != 'Y')")
+        conditions.append("(c.hm_ind IS NULL OR c.hm_ind = FALSE)")
 
     if filters.get("power_units_min") is not None:
         conditions.append(f"c.power_units >= ${idx}")
@@ -1197,7 +1068,7 @@ async def fetch_carriers(filters: dict) -> dict:
     if _oos_conds:
         _cte_parts.append((
             "_oos_filter",
-            f"SELECT dot_number::text AS dot_number FROM inspections "
+            f"SELECT dot_number FROM inspections "
             f"GROUP BY dot_number HAVING {' AND '.join(_oos_conds)}",
         ))
         _ins_joins.append(
@@ -1217,7 +1088,7 @@ async def fetch_carriers(filters: dict) -> dict:
     if _insp_count_conds:
         _cte_parts.append((
             "_insp_count_filter",
-            f"SELECT dot_number::text AS dot_number FROM inspections "
+            f"SELECT dot_number FROM inspections "
             f"GROUP BY dot_number HAVING {' AND '.join(_insp_count_conds)}",
         ))
         _ins_joins.append(
@@ -1241,7 +1112,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_crash_count_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number"
+            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number::text"
         )
 
     # Injuries filter (from crashes table: sum of injuries per carrier)
@@ -1261,7 +1132,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_injuries_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number"
+            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number::text"
         )
 
     # Fatalities filter (from crashes table: sum of fatalities per carrier)
@@ -1281,7 +1152,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_fatalities_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number"
+            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number::text"
         )
 
     # Towaway filter (from crashes table: count of tow_away=true per carrier)
@@ -1301,7 +1172,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"GROUP BY dot_number HAVING {' AND '.join(_toway_conds)}",
         ))
         _ins_joins.append(
-            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number"
+            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number::text"
         )
 
     # ------------------------------------------------------------------
@@ -1320,7 +1191,7 @@ async def fetch_carriers(filters: dict) -> dict:
     #      conditions simultaneously).
 
     _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
-    _IH_DOCKET_EXPR = "c.docket1prefix || c.docket1"
+    _IH_DOCKET_EXPR = "'MC' || c.mc_number::text"
     _ACTIVE_POLICY = "(cancl_effective_date IS NULL OR cancl_effective_date = '')"
 
     def _add_positive_ins_filter(where_body: str):
@@ -1565,8 +1436,7 @@ async def fetch_carriers(filters: dict) -> dict:
     limit_val = min(int(filters.get("limit", 500)), 5000)
     offset_val = int(filters.get("offset", 0))
 
-    # Select only the columns actually used by _carrier_row_to_dict
-    _LIST_COLS = """c.id, c.dot_number, c.legal_name, c.dba_name,
+    _LIST_COLS = """c.dot_number, c.mc_number, c.dockets, c.legal_name, c.dba_name,
         c.phone, c.email_address, c.fax,
         c.power_units, c.total_drivers,
         c.phy_street, c.phy_city, c.phy_state, c.phy_zip, c.phy_country,
@@ -1574,22 +1444,13 @@ async def fetch_carriers(filters: dict) -> dict:
         c.carrier_mailing_state, c.carrier_mailing_zip, c.carrier_mailing_country,
         c.mcs150_date, c.mcs150_mileage, c.mcs150_mileage_year,
         c.classdef, c.carrier_operation, c.hm_ind,
-        c.dun_bradstreet_no, c.safety_rating, c.safety_rating_date,
-        c.status_code, c.carship,
-        c.docket1prefix, c.docket1, c.docket2prefix, c.docket2,
-        c.docket3prefix, c.docket3, c.docket1_status_code,
+        c.dun_bradstreet_no,
+        c.status_code, c.docket1_status_code,
         c.company_officer_1, c.company_officer_2,
-        c.fleetsize, c.add_date, c.truck_units, c.bus_units,
+        c.fleetsize, c.add_date, c.truck_units,
         c.interstate_beyond_100_miles, c.interstate_within_100_miles,
         c.intrastate_beyond_100_miles, c.intrastate_within_100_miles,
-        c.crgo_genfreight, c.crgo_household, c.crgo_metalsheet, c.crgo_motoveh,
-        c.crgo_drivetow, c.crgo_logpole, c.crgo_bldgmat, c.crgo_mobilehome,
-        c.crgo_machlrg, c.crgo_produce, c.crgo_liqgas, c.crgo_intermodal,
-        c.crgo_passengers, c.crgo_oilfield, c.crgo_livestock, c.crgo_grainfeed,
-        c.crgo_coalcoke, c.crgo_meat, c.crgo_garbage, c.crgo_usmail,
-        c.crgo_chem, c.crgo_drybulk, c.crgo_coldfood, c.crgo_beverages,
-        c.crgo_paperprod, c.crgo_utility, c.crgo_farmsupp, c.crgo_construct,
-        c.crgo_waterwell, c.crgo_cargoothr, c.crgo_cargoothr_desc"""
+        c.cargo, c.other_dockets, c.equipment"""
 
     # Build CTE prefix and FROM clause with JOINs
     cte_prefix = ""
@@ -1602,13 +1463,7 @@ async def fetch_carriers(filters: dict) -> dict:
     if _ins_joins:
         from_clause += " " + " ".join(_ins_joins)
 
-    # When a highly selective filter (dot_number, mc_number) is active,
-    # ORDER BY c.id DESC tricks Postgres into a full PK scan instead of
-    # using the column index.  Use legal_name as a neutral sort in that case.
-    _has_pinpoint_filter = bool(
-        filters.get("dot_number") or filters.get("mc_number")
-    )
-    _order = "c.legal_name ASC" if _has_pinpoint_filter else "c.id DESC"
+    _order = "c.legal_name ASC"
 
     query = f"""{cte_prefix}
         SELECT {_LIST_COLS}
@@ -1626,10 +1481,8 @@ async def fetch_carriers(filters: dict) -> dict:
         FROM pg_class WHERE relname = 'carriers'
     """
 
-    # Safety/inspection/crash CTEs join text ↔ bigint dot_number columns.
-    # Postgres mis-estimates the CTE cardinality and picks a nested-loop
-    # plan that is ~200× slower.  Disabling nested loops forces a hash
-    # join which finishes in < 1 s.
+    # CTE-based filters can cause Postgres to pick a nested-loop plan.
+    # Disabling nested loops forces a hash join which finishes in < 1 s.
     _needs_nestloop_off = bool(_cte_parts)
 
     async def _run_query(conn):
@@ -1688,25 +1541,19 @@ async def fetch_carriers(filters: dict) -> dict:
         # Prepare keys for all three fetches
         docket_keys = []
         dot_numbers_int: list[int] = []
-        dot_numbers_str: list[str] = []
         for row in rows:
             d = dict(row)
-            pfx = d.get("docket1prefix") or ""
-            num = d.get("docket1") or ""
-            docket_keys.append(f"{pfx}{num}" if pfx and num else "")
+            mc = d.get("mc_number")
+            docket_keys.append(f"MC{mc}" if mc else "")
             dn = d.get("dot_number")
             if dn is not None:
-                dn_s = str(dn).strip()
-                if dn_s:
-                    dot_numbers_str.append(dn_s)
-                    try:
-                        dot_numbers_int.append(int(dn))
-                    except (TypeError, ValueError):
-                        pass
+                try:
+                    dot_numbers_int.append(int(dn))
+                except (TypeError, ValueError):
+                    pass
 
         unique_docket_keys = list(set(k for k in docket_keys if k))
         unique_dots_int = list(set(dot_numbers_int))
-        unique_dots_str = list(set(dot_numbers_str))
 
         # Fire all three batch fetches in parallel
         async def _fetch_insurance():
@@ -1734,13 +1581,14 @@ async def fetch_carriers(filters: dict) -> dict:
             )
 
         async def _fetch_crash_batch():
-            if not unique_dots_str:
+            if not unique_dots_int:
                 return []
+            dot_strs = [str(d) for d in unique_dots_int]
             return await pool.fetch(
                 """SELECT * FROM crashes
                    WHERE dot_number = ANY($1)
                    ORDER BY report_date DESC NULLS LAST""",
-                unique_dots_str,
+                dot_strs,
             )
 
         ih_rows, insp_rows_batch, crash_rows_batch = await asyncio.gather(
@@ -1779,7 +1627,7 @@ async def fetch_carriers(filters: dict) -> dict:
                 cdn_int = None
             carrier["inspections"] = insp_map.get(cdn_int, []) if cdn_int is not None else []
 
-        # Attach crashes
+        # Attach crashes (crashes.dot_number is TEXT)
         crash_map: dict[str, list[dict]] = {}
         for cr in crash_rows_batch:
             d = _crash_row_to_dict(cr)
@@ -1787,9 +1635,8 @@ async def fetch_carriers(filters: dict) -> dict:
             if dn:
                 crash_map.setdefault(dn, []).append(d)
         for carrier in carrier_dicts:
-            cdn = carrier.get("dot_number")
-            cdn_str = str(cdn).strip() if cdn is not None else ""
-            carrier["crashes"] = crash_map.get(cdn_str, []) if cdn_str else []
+            cdn = str(carrier.get("dot_number", "")).strip()
+            carrier["crashes"] = crash_map.get(cdn, []) if cdn else []
 
         return {
             "data": carrier_dicts,
@@ -1800,12 +1647,12 @@ async def fetch_carriers(filters: dict) -> dict:
         return {"data": [], "filtered_count": 0}
 
 async def delete_carrier(dot_number: str) -> bool:
-    """Delete a carrier by DOT number (Census schema uses dot_number as key)."""
+    """Delete a carrier by DOT number."""
     pool = get_pool()
     try:
         result = await pool.execute(
             "DELETE FROM carriers WHERE dot_number = $1",
-            dot_number.strip(),
+            int(dot_number.strip()),
         )
         return not result.endswith("0")
     except Exception as e:
@@ -1835,7 +1682,7 @@ async def get_carrier_dashboard_stats() -> dict:
                     COUNT(*) AS total,
                     COUNT(*) FILTER (WHERE status_code = 'A') AS active,
                     COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
-                    COUNT(*) FILTER (WHERE hm_ind = 'Y') AS hazmat,
+                    COUNT(*) FILTER (WHERE hm_ind = TRUE) AS hazmat,
                     COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
                     COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
                     COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm
@@ -1866,28 +1713,11 @@ async def get_carrier_dashboard_stats() -> dict:
         return _dashboard_cache or {}
 
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
-    """Update safety-related fields for a carrier by DOT number."""
-    pool = get_pool()
-    try:
-        result = await pool.execute(
-            """
-            UPDATE carriers
-            SET safety_rating = $1,
-                safety_rating_date = $2
-            WHERE dot_number = $3
-            """,
-            safety_data.get("safety_rating"),
-            safety_data.get("safety_rating_date"),
-            dot_number.strip(),
-        )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error updating safety for DOT {dot_number}: {e}")
-        return False
+    """No-op: safety data is now in the separate safety table."""
+    _ = safety_data
+    return True
 
-# Select only the columns actually used by _carrier_row_to_dict (shared
-# with fetch_carriers) to avoid fetching 100+ unused columns per row.
-_MC_RANGE_COLS = """id, dot_number, legal_name, dba_name,
+_MC_RANGE_COLS = """dot_number, mc_number, dockets, legal_name, dba_name,
     phone, email_address, fax,
     power_units, total_drivers,
     phy_street, phy_city, phy_state, phy_zip, phy_country,
@@ -1895,34 +1725,24 @@ _MC_RANGE_COLS = """id, dot_number, legal_name, dba_name,
     carrier_mailing_state, carrier_mailing_zip, carrier_mailing_country,
     mcs150_date, mcs150_mileage, mcs150_mileage_year,
     classdef, carrier_operation, hm_ind,
-    dun_bradstreet_no, safety_rating, safety_rating_date,
-    status_code, carship,
-    docket1prefix, docket1, docket2prefix, docket2,
-    docket3prefix, docket3, docket1_status_code,
+    dun_bradstreet_no,
+    status_code, docket1_status_code,
     company_officer_1, company_officer_2,
-    fleetsize, add_date, truck_units, bus_units,
+    fleetsize, add_date, truck_units,
     interstate_beyond_100_miles, interstate_within_100_miles,
     intrastate_beyond_100_miles, intrastate_within_100_miles,
-    crgo_genfreight, crgo_household, crgo_metalsheet, crgo_motoveh,
-    crgo_drivetow, crgo_logpole, crgo_bldgmat, crgo_mobilehome,
-    crgo_machlrg, crgo_produce, crgo_liqgas, crgo_intermodal,
-    crgo_passengers, crgo_oilfield, crgo_livestock, crgo_grainfeed,
-    crgo_coalcoke, crgo_meat, crgo_garbage, crgo_usmail,
-    crgo_chem, crgo_drybulk, crgo_coldfood, crgo_beverages,
-    crgo_paperprod, crgo_utility, crgo_farmsupp, crgo_construct,
-    crgo_waterwell, crgo_cargoothr, crgo_cargoothr_desc"""
+    cargo, other_dockets, equipment"""
 
 async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
-    """Fetch carriers whose docket1 number falls within start_mc..end_mc."""
+    """Fetch carriers whose mc_number falls within start_mc..end_mc."""
     pool = get_pool()
     try:
         rows = await pool.fetch(
             f"""
             SELECT {_MC_RANGE_COLS} FROM carriers
-            WHERE docket1 IS NOT NULL
-              AND docket1 ~ '^[0-9]+$'
-              AND docket1::bigint BETWEEN $1 AND $2
-            ORDER BY docket1::bigint
+            WHERE mc_number IS NOT NULL
+              AND mc_number BETWEEN $1 AND $2
+            ORDER BY mc_number
             LIMIT 1000
             """,
             int(start_mc),
@@ -2979,9 +2799,8 @@ async def fetch_crashes(filters: dict) -> dict:
     idx = 1
 
     if filters.get("dot_number"):
-        dot_val = filters["dot_number"].strip()
         conditions.append(f"dot_number = ${idx}")
-        params.append(dot_val)
+        params.append(filters["dot_number"].strip())
         idx += 1
 
     if filters.get("report_number"):
