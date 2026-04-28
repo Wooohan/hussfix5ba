@@ -437,8 +437,6 @@ ON CONFLICT (email) DO NOTHING;
 -- ── Performance indexes ─────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number ON carriers(dot_number);
 CREATE INDEX IF NOT EXISTS idx_carriers_mc_number ON carriers(mc_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_status_code ON carriers(status_code);
-CREATE INDEX IF NOT EXISTS idx_carriers_legal_name ON carriers(legal_name);
 CREATE INDEX IF NOT EXISTS idx_carriers_status_lname ON carriers(status_code, legal_name);
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
@@ -1505,6 +1503,9 @@ async def fetch_carriers(filters: dict) -> dict:
         return await conn.fetchrow(count_q, *params)
 
     try:
+        import time as _t
+        _t0 = _t.monotonic()
+
         use_fast_count = not is_filtered
         if use_fast_count:
             if _needs_nestloop_off:
@@ -1538,13 +1539,16 @@ async def fetch_carriers(filters: dict) -> dict:
                 )
             filtered_count = count_row["cnt"] if count_row else 0
 
+        _t1 = _t.monotonic()
+
         # ── Build carrier dicts + insurance batch-fetch ──────────────────
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
 
+        _t2 = _t.monotonic()
+
         # Inspections & crashes are fetched on-demand via
         # /api/inspections/by-dot and /api/crashes/by-dot when the user
-        # opens the detail panel.  Batch-fetching them here for 500
-        # carriers slowed the list endpoint significantly.
+        # opens the detail panel.
 
         # Batch-fetch insurance history (lightweight — table is small)
         docket_keys = []
@@ -1577,6 +1581,9 @@ async def fetch_carriers(filters: dict) -> dict:
                             carrier["insurance_history_filings"] = _format_insurance_history(ih_map[dk])
             except Exception as e:
                 print(f"[DB] Error in _fetch_insurance: {e}")
+
+        _t3 = _t.monotonic()
+        print(f"[PERF] query={(_t1-_t0)*1000:.0f}ms  dict={(_t2-_t1)*1000:.0f}ms  insurance={(_t3-_t2)*1000:.0f}ms  total={(_t3-_t0)*1000:.0f}ms  rows={len(rows)}")
 
         return {
             "data": carrier_dicts,
