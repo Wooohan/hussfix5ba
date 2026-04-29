@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS inspections (
 CREATE TABLE IF NOT EXISTS crashes (
     report_number TEXT,
     report_seq_no INTEGER,
-    dot_number INTEGER,
+    dot_number BIGINT,
     report_date DATE,
     report_state TEXT,
     fatalities INTEGER,
