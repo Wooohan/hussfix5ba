@@ -3,8 +3,14 @@ import json
 import math
 import asyncio
 import time as _time
+from datetime import date as _date
 import asyncpg
 from typing import Optional
+
+def _parse_date(s: str) -> _date:
+    """Parse 'YYYY-MM-DD' string to datetime.date for asyncpg."""
+    parts = s.split("-")
+    return _date(int(parts[0]), int(parts[1]), int(parts[2]))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
@@ -93,8 +99,9 @@ CREATE TABLE IF NOT EXISTS insurance_history (
     trans_date CHARACTER VARYING(15),
     underl_lim_amount CHARACTER VARYING(15),
     max_cov_amount CHARACTER VARYING(15),
-    effective_date CHARACTER VARYING(15),
-    cancl_effective_date CHARACTER VARYING(15)
+    effective_date DATE,
+    cancl_effective_date DATE,
+    mc_num BIGINT
 );
 
 -- ── Inspections ─────────────────────────────────────────────────────────────
@@ -442,6 +449,10 @@ CREATE INDEX IF NOT EXISTS idx_crashes_dot_number ON crashes(dot_number);
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number ON inspections(dot_number);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_docket ON insurance_history(docket_number);
 CREATE INDEX IF NOT EXISTS idx_insurance_history_dot ON insurance_history(dot_number);
+CREATE INDEX IF NOT EXISTS idx_ih_docket_type ON insurance_history(docket_number, ins_type_desc);
+CREATE INDEX IF NOT EXISTS idx_ih_effective_date ON insurance_history(effective_date);
+CREATE INDEX IF NOT EXISTS idx_ih_cancl_date ON insurance_history(cancl_effective_date);
+CREATE INDEX IF NOT EXISTS idx_ih_mc_num ON insurance_history(mc_num) WHERE mc_num IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_safety_dot_number ON safety(dot_number);
 """
 
@@ -661,17 +672,18 @@ def _format_insurance_history(raw_filings) -> list[dict]:
             coverage = f"${amount_int:,}"
         except (ValueError, TypeError):
             coverage = raw_amount or "N/A"
-        cancl = (row.get("cancl_effective_date") or "").strip()
+        eff = row.get("effective_date")
+        cancl = row.get("cancl_effective_date")
         results.append({
             "type": (row.get("ins_type_desc") or "").strip(),
             "coverageAmount": coverage,
             "policyNumber": (row.get("policy_no") or "").strip(),
-            "effectiveDate": (row.get("effective_date") or "").strip(),
+            "effectiveDate": eff.isoformat() if eff else "",
             "carrier": (row.get("name_company") or "").strip(),
             "formCode": (row.get("ins_form_code") or "").strip(),
             "transDate": (row.get("trans_date") or "").strip(),
             "underlLimAmount": (row.get("underl_lim_amount") or "").strip(),
-            "canclEffectiveDate": cancl,
+            "canclEffectiveDate": cancl.isoformat() if cancl else "",
             "status": "Cancelled" if cancl else "Active",
         })
     return results
@@ -1044,17 +1056,27 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(filters["drivers_max"])
         idx += 1
 
-    # CTE parts: list of (cte_name, cte_sql)
-    _cte_parts: list[tuple[str, str]] = []
-    # JOIN clauses for positive filters (safety + insurance)
-    _ins_joins: list[str] = []
     _cte_idx = 0
+    # CTE+JOIN parts — used for BOTH main and count queries.
+    # CTE+JOIN with nestloop=off uses hash joins which are fast for
+    # both LIMIT and COUNT. Avoids per-row EXISTS evaluation.
+    _query_ctes: list[tuple[str, str]] = []
+    _query_joins: list[str] = []
 
     # ------------------------------------------------------------------
     # Safety filters – inspections & crashes tables
     # ------------------------------------------------------------------
-    # These filters use CTE-based pre-filtering against the inspections
-    # and crashes tables, joining back to carriers via dot_number.
+
+    def _add_safety_filter(
+        cte_name: str, table: str, having: str, join_col: str = "dot_number"
+    ):
+        _query_ctes.append((
+            cte_name,
+            f"SELECT {join_col} FROM {table} GROUP BY {join_col} HAVING {having}",
+        ))
+        _query_joins.append(
+            f"INNER JOIN {cte_name} ON {cte_name}.{join_col} = c.{join_col}"
+        )
 
     # OOS violations (from inspections table: sum of oos_total per carrier)
     _oos_conds: list[str] = []
@@ -1067,14 +1089,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["oos_max"]))
         idx += 1
     if _oos_conds:
-        _cte_parts.append((
-            "_oos_filter",
-            f"SELECT dot_number FROM inspections "
-            f"GROUP BY dot_number HAVING {' AND '.join(_oos_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _oos_filter ON _oos_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_oos_f", "inspections", " AND ".join(_oos_conds))
 
     # Inspections count filter (from inspections table)
     _insp_count_conds: list[str] = []
@@ -1087,14 +1102,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["inspections_max"]))
         idx += 1
     if _insp_count_conds:
-        _cte_parts.append((
-            "_insp_count_filter",
-            f"SELECT dot_number FROM inspections "
-            f"GROUP BY dot_number HAVING {' AND '.join(_insp_count_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _insp_count_filter ON _insp_count_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_insp_f", "inspections", " AND ".join(_insp_count_conds))
 
     # Crashes count filter (from crashes table)
     _crash_count_conds: list[str] = []
@@ -1107,14 +1115,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["crashes_max"]))
         idx += 1
     if _crash_count_conds:
-        _cte_parts.append((
-            "_crash_count_filter",
-            f"SELECT dot_number FROM crashes "
-            f"GROUP BY dot_number HAVING {' AND '.join(_crash_count_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _crash_count_filter ON _crash_count_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_crash_f", "crashes", " AND ".join(_crash_count_conds))
 
     # Injuries filter (from crashes table: sum of injuries per carrier)
     _injuries_conds: list[str] = []
@@ -1127,14 +1128,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["injuries_max"]))
         idx += 1
     if _injuries_conds:
-        _cte_parts.append((
-            "_injuries_filter",
-            f"SELECT dot_number FROM crashes "
-            f"GROUP BY dot_number HAVING {' AND '.join(_injuries_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _injuries_filter ON _injuries_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_injuries_f", "crashes", " AND ".join(_injuries_conds))
 
     # Fatalities filter (from crashes table: sum of fatalities per carrier)
     _fatalities_conds: list[str] = []
@@ -1147,14 +1141,7 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["fatalities_max"]))
         idx += 1
     if _fatalities_conds:
-        _cte_parts.append((
-            "_fatalities_filter",
-            f"SELECT dot_number FROM crashes "
-            f"GROUP BY dot_number HAVING {' AND '.join(_fatalities_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _fatalities_filter ON _fatalities_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_fatalities_f", "crashes", " AND ".join(_fatalities_conds))
 
     # Towaway filter (from crashes table: count of tow_away=true per carrier)
     _toway_conds: list[str] = []
@@ -1167,44 +1154,31 @@ async def fetch_carriers(filters: dict) -> dict:
         params.append(int(filters["toway_max"]))
         idx += 1
     if _toway_conds:
-        _cte_parts.append((
-            "_toway_filter",
-            f"SELECT dot_number FROM crashes "
-            f"GROUP BY dot_number HAVING {' AND '.join(_toway_conds)}",
-        ))
-        _ins_joins.append(
-            "INNER JOIN _toway_filter ON _toway_filter.dot_number = c.dot_number"
-        )
+        _add_safety_filter("_toway_f", "crashes", " AND ".join(_toway_conds))
 
     # ------------------------------------------------------------------
-    # Insurance-related filters – independent CTE-based pre-filtering
+    # Insurance-related filters – EXISTS-based subquery approach
     # ------------------------------------------------------------------
-    # Each independent insurance condition pre-selects qualifying
-    # docket_numbers from insurance_history via a CTE, then carriers
-    # are filtered with INNER JOINs using the expression index on
-    # (docket1prefix || docket1).  This is dramatically faster than
-    # correlated EXISTS on 4M+ carriers because:
-    #   1. insurance_history is scanned once per filter (not per carrier)
-    #   2. The expression index drives the carrier lookup
-    #   3. Each filter is independent so different insurance_history rows
-    #      can satisfy different filters (fixes the correctness bug where
-    #      the old consolidated EXISTS required one row to match ALL
-    #      conditions simultaneously).
+    # Uses EXISTS subqueries instead of CTE+JOIN for lazy evaluation.
+    # With LIMIT 500, Postgres evaluates carriers in sorted order and
+    # stops after finding 500 matches — no need to scan entire tables.
 
     _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
-    _IH_DOCKET_EXPR = "'MC' || c.mc_number::text"
-    _ACTIVE_POLICY = "(cancl_effective_date IS NULL OR cancl_effective_date = '')"
+    _ACTIVE_POLICY = "(cancl_effective_date IS NULL)"
 
-    def _add_positive_ins_filter(where_body: str):
-        """Register an insurance CTE and add an INNER JOIN for it."""
+    def _add_positive_ins_filter(where_body: str, extra_where: str = ""):
+        """Add CTE+JOIN for insurance filtering (BIGINT join on mc_number)."""
         nonlocal _cte_idx
-        name = f"_ifd{_cte_idx}"
-        _cte_parts.append((
-            name,
-            f"SELECT DISTINCT docket_number FROM insurance_history WHERE {where_body}",
+        cte_name = f"_ifd{_cte_idx}"
+        extra = f" AND {extra_where}" if extra_where else ""
+        _query_ctes.append((
+            cte_name,
+            f"SELECT DISTINCT mc_num "
+            f"FROM insurance_history "
+            f"WHERE mc_num IS NOT NULL AND ({where_body}){extra}",
         ))
-        _ins_joins.append(
-            f"INNER JOIN {name} ON {name}.docket_number = {_IH_DOCKET_EXPR}"
+        _query_joins.append(
+            f"INNER JOIN {cte_name} ON {cte_name}.mc_num = c.mc_number"
         )
         _cte_idx += 1
 
@@ -1242,9 +1216,9 @@ async def fetch_carriers(filters: dict) -> dict:
         elif val == "0":
             conditions.append(
                 f"NOT EXISTS (SELECT 1 FROM insurance_history ih "
-                f"WHERE ih.docket_number = {_IH_DOCKET_EXPR} "
+                f"WHERE ih.mc_num = c.mc_number "
                 f"AND ih.ins_type_desc {op} ${idx} "
-                f"AND (ih.cancl_effective_date IS NULL OR ih.cancl_effective_date = ''))"
+                f"AND ih.cancl_effective_date IS NULL)"
             )
             params.append(pattern_val)
             idx += 1
@@ -1275,49 +1249,32 @@ async def fetch_carriers(filters: dict) -> dict:
     # fall within the range
     _eff_date_conds: list[str] = []
     if filters.get("ins_effective_date_from"):
-        parts = filters["ins_effective_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _eff_date_conds.append(
-            f"TO_DATE(effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_from_db_fmt)
+        _eff_date_conds.append(f"effective_date >= ${idx}")
+        params.append(_parse_date(filters["ins_effective_date_from"]))
         idx += 1
     if filters.get("ins_effective_date_to"):
-        parts = filters["ins_effective_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _eff_date_conds.append(
-            f"TO_DATE(effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_to_db_fmt)
+        _eff_date_conds.append(f"effective_date <= ${idx}")
+        params.append(_parse_date(filters["ins_effective_date_to"]))
         idx += 1
     if _eff_date_conds:
         _add_positive_ins_filter(
-            "effective_date IS NOT NULL AND effective_date LIKE '%/%/%' AND "
+            "effective_date IS NOT NULL AND "
             + " AND ".join(_eff_date_conds)
         )
 
     # Insurance cancellation-date range – group from+to
     _cancl_date_conds: list[str] = []
     if filters.get("ins_cancellation_date_from"):
-        parts = filters["ins_cancellation_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _cancl_date_conds.append(
-            f"TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_from_db_fmt)
+        _cancl_date_conds.append(f"cancl_effective_date >= ${idx}")
+        params.append(_parse_date(filters["ins_cancellation_date_from"]))
         idx += 1
     if filters.get("ins_cancellation_date_to"):
-        parts = filters["ins_cancellation_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
-        _cancl_date_conds.append(
-            f"TO_DATE(cancl_effective_date, 'MM/DD/YYYY') <= TO_DATE(${idx}, 'MM/DD/YYYY')"
-        )
-        params.append(date_to_db_fmt)
+        _cancl_date_conds.append(f"cancl_effective_date <= ${idx}")
+        params.append(_parse_date(filters["ins_cancellation_date_to"]))
         idx += 1
     if _cancl_date_conds:
         _add_positive_ins_filter(
-            "cancl_effective_date IS NOT NULL AND cancl_effective_date != '' "
-            "AND cancl_effective_date LIKE '%/%/%' AND "
+            "cancl_effective_date IS NOT NULL AND "
             + " AND ".join(_cancl_date_conds)
         )
 
@@ -1349,46 +1306,45 @@ async def fetch_carriers(filters: dict) -> dict:
                 idx += 1
         _add_positive_ins_filter(
             f"({' OR '.join(or_parts)}) "
-            f"AND (cancl_effective_date IS NULL OR cancl_effective_date = '' "
-            f"OR TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
+            f"AND (cancl_effective_date IS NULL OR cancl_effective_date >= CURRENT_DATE)"
         )
 
     # Next-renewal-date helper (computes next anniversary of effective_date)
+    # effective_date is now native DATE, so no TO_DATE parsing needed
     _next_renewal_sql = (
         "CASE "
         "  WHEN MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
+        "         EXTRACT(MONTH FROM effective_date)::int,"
+        "         LEAST(EXTRACT(DAY FROM effective_date)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 EXTRACT(MONTH FROM effective_date)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "       >= CURRENT_DATE "
         "  THEN MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
+        "         EXTRACT(MONTH FROM effective_date)::int,"
+        "         LEAST(EXTRACT(DAY FROM effective_date)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 EXTRACT(MONTH FROM effective_date)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "  ELSE MAKE_DATE("
         "         EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "         EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
-        "         LEAST(EXTRACT(DAY FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int,"
+        "         EXTRACT(MONTH FROM effective_date)::int,"
+        "         LEAST(EXTRACT(DAY FROM effective_date)::int,"
         "               EXTRACT(DAY FROM (DATE_TRUNC('MONTH', MAKE_DATE("
         "                 EXTRACT(YEAR FROM CURRENT_DATE)::int + 1,"
-        "                 EXTRACT(MONTH FROM TO_DATE(effective_date, 'MM/DD/YYYY'))::int, 1))"
+        "                 EXTRACT(MONTH FROM effective_date)::int, 1))"
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "END"
     )
 
     # Active-policy guard for renewal filters (no ih. prefix – used in CTE)
     _ACTIVE_POLICY_GUARD = (
-        "effective_date IS NOT NULL AND effective_date LIKE '%/%/%' "
-        "AND (cancl_effective_date IS NULL OR cancl_effective_date = '' "
-        "OR TO_DATE(cancl_effective_date, 'MM/DD/YYYY') >= CURRENT_DATE)"
+        "effective_date IS NOT NULL "
+        "AND (cancl_effective_date IS NULL OR cancl_effective_date >= CURRENT_DATE)"
     )
 
     # Renewal Policy Monthly filter
@@ -1404,31 +1360,42 @@ async def fetch_carriers(filters: dict) -> dict:
 
     # Renewal Policy Date range filter – group from+to
     _renewal_date_conds: list[str] = []
+    _renewal_month_pre: str = ""
     if filters.get("renewal_date_from"):
-        parts = filters["renewal_date_from"].split("-")
-        date_from_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         _renewal_date_conds.append(
-            f"({_next_renewal_sql}) >= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f"({_next_renewal_sql}) >= ${idx}"
         )
-        params.append(date_from_db_fmt)
+        params.append(_parse_date(filters["renewal_date_from"]))
         idx += 1
     if filters.get("renewal_date_to"):
-        parts = filters["renewal_date_to"].split("-")
-        date_to_db_fmt = f"{parts[1]}/{parts[2]}/{parts[0]}"
         _renewal_date_conds.append(
-            f"({_next_renewal_sql}) <= TO_DATE(${idx}, 'MM/DD/YYYY')"
+            f"({_next_renewal_sql}) <= ${idx}"
         )
-        params.append(date_to_db_fmt)
+        params.append(_parse_date(filters["renewal_date_to"]))
         idx += 1
     if _renewal_date_conds:
+        # Month pre-filter: skip rows where effective_date month can't
+        # match the renewal date range (avoids expensive MAKE_DATE on ~90% of rows)
+        if filters.get("renewal_date_from") and filters.get("renewal_date_to"):
+            from_d = _parse_date(filters["renewal_date_from"])
+            to_d = _parse_date(filters["renewal_date_to"])
+            if from_d.month <= to_d.month:
+                months = list(range(from_d.month, to_d.month + 1))
+            else:
+                months = list(range(from_d.month, 13)) + list(range(1, to_d.month + 1))
+            _renewal_month_pre = (
+                f"EXTRACT(MONTH FROM effective_date) IN ({','.join(str(m) for m in months)})"
+            )
         _add_positive_ins_filter(
-            f"{_ACTIVE_POLICY_GUARD} AND " + " AND ".join(_renewal_date_conds)
+            f"{_ACTIVE_POLICY_GUARD} AND " + " AND ".join(_renewal_date_conds),
+            extra_where=_renewal_month_pre,
         )
 
     # ------------------------------------------------------------------
     # Default / WHERE / LIMIT / OFFSET
     # ------------------------------------------------------------------
-    is_filtered = len(conditions) > 0 or len(_ins_joins) > 0
+    _has_cte = bool(_query_ctes)
+    is_filtered = len(conditions) > 0 or _has_cte
     if not is_filtered:
         conditions.append("c.status_code = 'A'")
 
@@ -1453,22 +1420,21 @@ async def fetch_carriers(filters: dict) -> dict:
         c.intrastate_beyond_100_miles, c.intrastate_within_100_miles,
         c.cargo, c.other_dockets, c.equipment"""
 
-    # Build CTE prefix and FROM clause with JOINs
-    cte_prefix = ""
-    if _cte_parts:
-        cte_prefix = "WITH " + ", ".join(
-            f"{name} AS ({sql})" for name, sql in _cte_parts
-        ) + " "
-
-    from_clause = "carriers c"
-    if _ins_joins:
-        from_clause += " " + " ".join(_ins_joins)
-
     _order = "c.legal_name ASC"
 
-    query = f"""{cte_prefix}
+    # Build query with CTEs if any filters use them
+    if _has_cte:
+        _cte_prefix = "WITH " + ", ".join(
+            f"{name} AS ({sql})" for name, sql in _query_ctes
+        )
+        _from_clause = "carriers c " + " ".join(_query_joins)
+    else:
+        _cte_prefix = ""
+        _from_clause = "carriers c"
+
+    query = f"""{_cte_prefix}
         SELECT {_LIST_COLS}
-        FROM {from_clause}
+        FROM {_from_clause}
         WHERE {where}
         ORDER BY {_order}
         LIMIT {limit_val} OFFSET {offset_val}
@@ -1482,61 +1448,40 @@ async def fetch_carriers(filters: dict) -> dict:
         FROM pg_class WHERE relname = 'carriers'
     """
 
-    # CTE-based filters can cause Postgres to pick a nested-loop plan.
-    # Disabling nested loops forces a hash join which finishes in < 1 s.
-    _needs_nestloop_off = bool(_cte_parts)
-
-    async def _run_query(conn):
-        """Run the main + count queries, optionally inside a txn."""
-        if _needs_nestloop_off:
-            await conn.execute("SET LOCAL enable_nestloop = off")
-        return await conn.fetch(query, *params)
-
-    async def _run_count(conn):
-        count_q = f"""{cte_prefix}
-            SELECT COUNT(*) as cnt
-            FROM {from_clause}
-            WHERE {where}
-        """
-        if _needs_nestloop_off:
-            await conn.execute("SET LOCAL enable_nestloop = off")
-        return await conn.fetchrow(count_q, *params)
-
     try:
         import time as _t
         _t0 = _t.monotonic()
 
         use_fast_count = not is_filtered
         if use_fast_count:
-            if _needs_nestloop_off:
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        rows = await _run_query(conn)
-                count_row = await pool.fetchrow(fast_count_query)
-            else:
-                rows, count_row = await asyncio.gather(
-                    pool.fetch(query, *params),
-                    pool.fetchrow(fast_count_query),
-                )
+            rows, count_row = await asyncio.gather(
+                pool.fetch(query, *params),
+                pool.fetchrow(fast_count_query),
+            )
             filtered_count = count_row["cnt"] if count_row else 0
         else:
-            if _needs_nestloop_off:
-                async with pool.acquire() as c1, pool.acquire() as c2:
-                    async with c1.transaction(), c2.transaction():
-                        rows, count_row = await asyncio.gather(
-                            _run_query(c1),
-                            _run_count(c2),
-                        )
-            else:
-                count_query = f"""{cte_prefix}
-                    SELECT COUNT(*) as cnt
-                    FROM {from_clause}
-                    WHERE {where}
-                """
-                rows, count_row = await asyncio.gather(
-                    pool.fetch(query, *params),
-                    pool.fetchrow(count_query, *params),
-                )
+            count_query = f"""{_cte_prefix}
+                SELECT COUNT(*) as cnt
+                FROM {_from_clause}
+                WHERE {where}
+            """
+            # Both queries need nestloop=off for hash joins on CTE results
+            async def _run_query(q, conn):
+                if _has_cte:
+                    await conn.execute("SET LOCAL enable_nestloop = off")
+                return await conn.fetch(q, *params)
+
+            async def _run_count_q(q, conn):
+                if _has_cte:
+                    await conn.execute("SET LOCAL enable_nestloop = off")
+                return await conn.fetchrow(q, *params)
+
+            async with pool.acquire() as conn1, pool.acquire() as conn2:
+                async with conn1.transaction(), conn2.transaction():
+                    rows, count_row = await asyncio.gather(
+                        _run_query(query, conn1),
+                        _run_count_q(count_query, conn2),
+                    )
             filtered_count = count_row["cnt"] if count_row else 0
 
         _t1 = _t.monotonic()
@@ -2232,17 +2177,18 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
                 coverage = f"${amount_int:,}"
             except (ValueError, TypeError):
                 coverage = raw_amount or "N/A"
-            cancl = (row["cancl_effective_date"] or "").strip()
+            eff = row["effective_date"]
+            cancl = row["cancl_effective_date"]
             results.append({
                 "type": (row["ins_type_desc"] or "").strip(),
                 "coverageAmount": coverage,
                 "policyNumber": (row["policy_no"] or "").strip(),
-                "effectiveDate": (row["effective_date"] or "").strip(),
+                "effectiveDate": eff.isoformat() if eff else "",
                 "carrier": (row["name_company"] or "").strip(),
                 "formCode": (row["ins_form_code"] or "").strip(),
                 "transDate": (row["trans_date"] or "").strip(),
                 "underlLimAmount": (row["underl_lim_amount"] or "").strip(),
-                "canclEffectiveDate": cancl,
+                "canclEffectiveDate": cancl.isoformat() if cancl else "",
                 "status": "Cancelled" if cancl else "Active",
             })
         return results
