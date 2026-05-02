@@ -22,7 +22,13 @@ _pool: Optional[asyncpg.Pool] = None
 # ── Dashboard stat cache ────────────────────────────────────────────────────
 _dashboard_cache: Optional[dict] = None
 _dashboard_cache_ts: float = 0.0
-_DASHBOARD_CACHE_TTL = 300  # 5 minutes
+_DASHBOARD_CACHE_TTL = 7 * 24 * 60 * 60  # 1 week
+
+_inspections_dashboard_cache: Optional[dict] = None
+_inspections_dashboard_cache_ts: float = 0.0
+
+_crashes_dashboard_cache: Optional[dict] = None
+_crashes_dashboard_cache_ts: float = 0.0
 
 _SCHEMA_SQL = """
 -- ── Tables ──────────────────────────────────────────────────────────────────
@@ -1560,7 +1566,14 @@ async def get_carrier_count() -> int:
     return row["cnt"] if row else 0
 
 async def get_carrier_dashboard_stats() -> dict:
-    """Dashboard statistics for Census data (cached for 5 minutes)."""
+    """Dashboard statistics for Census data (cached for 1 week).
+
+    Returns a payload shaped for the frontend Dashboard component, including:
+      - total, active_carriers, brokers, not_authorized, other
+      - with_email, email_rate
+      - with_safety_rating, with_insurance
+      - with_inspections, with_crashes
+    """
     global _dashboard_cache, _dashboard_cache_ts
     now = _time.time()
     if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
@@ -1568,7 +1581,13 @@ async def get_carrier_dashboard_stats() -> dict:
 
     pool = get_pool()
     try:
-        row, insp_row, crash_row = await asyncio.gather(
+        (
+            row,
+            insp_row,
+            crash_row,
+            safety_row,
+            insurance_row,
+        ) = await asyncio.gather(
             pool.fetchrow("""
                 SELECT
                     COUNT(*) AS total,
@@ -1577,25 +1596,58 @@ async def get_carrier_dashboard_stats() -> dict:
                     COUNT(*) FILTER (WHERE hm_ind = TRUE) AS hazmat,
                     COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
                     COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
-                    COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm
+                    COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm,
+                    COUNT(*) FILTER (WHERE docket1_status_code = 'A') AS authorized,
+                    COUNT(*) FILTER (
+                        WHERE classdef IS NOT NULL AND classdef ILIKE '%broker%'
+                    ) AS brokers
                 FROM carriers
             """),
             pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM inspections"),
             pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM crashes"),
+            pool.fetchrow("""
+                SELECT COUNT(*) AS cnt
+                FROM carriers
+                WHERE safety_rating IS NOT NULL AND safety_rating <> ''
+            """),
+            pool.fetchrow(
+                "SELECT COUNT(DISTINCT dot_number) AS cnt FROM insurance_history "
+                "WHERE dot_number IS NOT NULL"
+            ),
         )
         if not row:
             return {}
+
+        total = row["total"] or 0
+        active = row["active"] or 0
+        authorized = row["authorized"] or 0
+        brokers = row["brokers"] or 0
+        with_email = row["with_email"] or 0
+        not_authorized = max(total - authorized, 0)
+        other = max(total - active - not_authorized, 0)
+        email_rate = f"{(with_email / total * 100):.1f}" if total else "0"
+
         result = {
-            "total": row["total"],
-            "active": row["active"],
-            "inactive": row["total"] - row["active"],
-            "withEmail": row["with_email"],
-            "hazmat": row["hazmat"],
-            "interstate": row["interstate"],
-            "intrastate_hm": row["intrastate_hm"],
-            "intrastate_non_hm": row["intrastate_non_hm"],
+            # Frontend-expected fields
+            "total": total,
+            "active_carriers": active,
+            "brokers": brokers,
+            "with_email": with_email,
+            "email_rate": email_rate,
+            "with_safety_rating": safety_row["cnt"] if safety_row else 0,
+            "with_insurance": insurance_row["cnt"] if insurance_row else 0,
             "with_inspections": insp_row["cnt"] if insp_row else 0,
             "with_crashes": crash_row["cnt"] if crash_row else 0,
+            "not_authorized": not_authorized,
+            "other": other,
+            # Backward-compatible legacy fields
+            "active": active,
+            "inactive": total - active,
+            "withEmail": with_email,
+            "hazmat": row["hazmat"] or 0,
+            "interstate": row["interstate"] or 0,
+            "intrastate_hm": row["intrastate_hm"] or 0,
+            "intrastate_non_hm": row["intrastate_non_hm"] or 0,
         }
         _dashboard_cache = result
         _dashboard_cache_ts = now
@@ -2590,7 +2642,15 @@ async def get_inspections_count() -> int:
         return 0
 
 async def get_inspections_dashboard_stats() -> dict:
-    """Get dashboard statistics for inspections."""
+    """Get dashboard statistics for inspections (cached for 1 week)."""
+    global _inspections_dashboard_cache, _inspections_dashboard_cache_ts
+    now = _time.time()
+    if (
+        _inspections_dashboard_cache
+        and (now - _inspections_dashboard_cache_ts) < _DASHBOARD_CACHE_TTL
+    ):
+        return _inspections_dashboard_cache
+
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -2623,10 +2683,12 @@ async def get_inspections_dashboard_stats() -> dict:
             "avgBasicViolations": float(row["avg_basic_violations"]) if row["avg_basic_violations"] else 0,
             "totalOosViolations": int(row["total_oos_violations"]) if row["total_oos_violations"] else 0,
         }
+        _inspections_dashboard_cache = result
+        _inspections_dashboard_cache_ts = now
         return result
     except Exception as e:
         print(f"[DB] Error fetching inspections dashboard stats: {e}")
-        return {}
+        return _inspections_dashboard_cache or {}
 
 async def fetch_inspection_by_id(unique_id: int) -> dict | None:
     """Fetch a single inspection by unique_id."""
@@ -2821,7 +2883,15 @@ async def get_crashes_count() -> int:
 
 
 async def get_crashes_dashboard_stats() -> dict:
-    """Get dashboard statistics for crashes."""
+    """Get dashboard statistics for crashes (cached for 1 week)."""
+    global _crashes_dashboard_cache, _crashes_dashboard_cache_ts
+    now = _time.time()
+    if (
+        _crashes_dashboard_cache
+        and (now - _crashes_dashboard_cache_ts) < _DASHBOARD_CACHE_TTL
+    ):
+        return _crashes_dashboard_cache
+
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -2837,7 +2907,7 @@ async def get_crashes_dashboard_stats() -> dict:
         """)
         if not row:
             return {}
-        return {
+        result = {
             "total": row["total"],
             "totalFatalities": int(row["total_fatalities"] or 0),
             "totalInjuries": int(row["total_injuries"] or 0),
@@ -2846,9 +2916,12 @@ async def get_crashes_dashboard_stats() -> dict:
             "totalNotPreventable": row["total_not_preventable"],
             "uniqueCarriers": row["unique_carriers"],
         }
+        _crashes_dashboard_cache = result
+        _crashes_dashboard_cache_ts = now
+        return result
     except Exception as e:
         print(f"[DB] Error fetching crashes dashboard stats: {e}")
-        return {}
+        return _crashes_dashboard_cache or {}
 
 
 async def fetch_crash_by_report(report_number: str) -> dict | None:
