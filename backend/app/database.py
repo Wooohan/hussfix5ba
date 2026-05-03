@@ -1,9 +1,4 @@
-"""Database layer for the FMCSA Carrier Search application.
-
-Handles PostgreSQL connections via asyncpg and provides query functions
-for carriers, insurance history, inspections, crashes, safety, FMCSA
-register, new ventures, users, and blocked IPs.
-"""
+"""Simplified and Comments Added Into your Code"""
 
 import os
 import json
