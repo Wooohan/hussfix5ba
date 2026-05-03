@@ -1580,81 +1580,99 @@ async def get_carrier_dashboard_stats() -> dict:
         return _dashboard_cache
 
     pool = get_pool()
-    try:
-        (
-            row,
-            insp_row,
-            crash_row,
-            safety_row,
-            insurance_row,
-        ) = await asyncio.gather(
-            pool.fetchrow("""
-                SELECT
-                    COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE status_code = 'A') AS active,
-                    COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
-                    COUNT(*) FILTER (WHERE hm_ind = TRUE) AS hazmat,
-                    COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
-                    COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
-                    COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm,
-                    COUNT(*) FILTER (WHERE docket1_status_code = 'A') AS authorized,
-                    COUNT(*) FILTER (
-                        WHERE classdef IS NOT NULL AND classdef ILIKE '%broker%'
-                    ) AS brokers
-                FROM carriers
-            """),
-            pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM inspections"),
-            pool.fetchrow("SELECT COUNT(DISTINCT dot_number) AS cnt FROM crashes"),
-            pool.fetchrow("""
-                SELECT COUNT(*) AS cnt
-                FROM carriers
-                WHERE safety_rating IS NOT NULL AND safety_rating <> ''
-            """),
-            pool.fetchrow(
-                "SELECT COUNT(DISTINCT dot_number) AS cnt FROM insurance_history "
-                "WHERE dot_number IS NOT NULL"
-            ),
-        )
-        if not row:
-            return {}
 
-        total = row["total"] or 0
-        active = row["active"] or 0
-        authorized = row["authorized"] or 0
-        brokers = row["brokers"] or 0
-        with_email = row["with_email"] or 0
-        not_authorized = max(total - authorized, 0)
-        other = max(total - active - not_authorized, 0)
-        email_rate = f"{(with_email / total * 100):.1f}" if total else "0"
+    async def _safe_fetchrow(sql: str, label: str):
+        """Run a fetchrow; log & return None on failure so one bad query
+        doesn't nuke the whole dashboard."""
+        try:
+            return await pool.fetchrow(sql)
+        except Exception as exc:
+            print(f"[DB] dashboard sub-query '{label}' failed: {exc}")
+            return None
 
-        result = {
-            # Frontend-expected fields
-            "total": total,
-            "active_carriers": active,
-            "brokers": brokers,
-            "with_email": with_email,
-            "email_rate": email_rate,
-            "with_safety_rating": safety_row["cnt"] if safety_row else 0,
-            "with_insurance": insurance_row["cnt"] if insurance_row else 0,
-            "with_inspections": insp_row["cnt"] if insp_row else 0,
-            "with_crashes": crash_row["cnt"] if crash_row else 0,
-            "not_authorized": not_authorized,
-            "other": other,
-            # Backward-compatible legacy fields
-            "active": active,
-            "inactive": total - active,
-            "withEmail": with_email,
-            "hazmat": row["hazmat"] or 0,
-            "interstate": row["interstate"] or 0,
-            "intrastate_hm": row["intrastate_hm"] or 0,
-            "intrastate_non_hm": row["intrastate_non_hm"] or 0,
-        }
+    (
+        row,
+        insp_row,
+        crash_row,
+        safety_row,
+        insurance_row,
+    ) = await asyncio.gather(
+        _safe_fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status_code = 'A') AS active,
+                COUNT(*) FILTER (WHERE email_address IS NOT NULL AND email_address != '') AS with_email,
+                COUNT(*) FILTER (WHERE hm_ind = TRUE) AS hazmat,
+                COUNT(*) FILTER (WHERE carrier_operation = 'A') AS interstate,
+                COUNT(*) FILTER (WHERE carrier_operation = 'B') AS intrastate_hm,
+                COUNT(*) FILTER (WHERE carrier_operation = 'C') AS intrastate_non_hm,
+                COUNT(*) FILTER (WHERE docket1_status_code = 'A') AS authorized,
+                COUNT(*) FILTER (
+                    WHERE classdef IS NOT NULL AND classdef ILIKE '%broker%'
+                ) AS brokers
+            FROM carriers
+            """,
+            "carriers_agg",
+        ),
+        _safe_fetchrow(
+            "SELECT COUNT(DISTINCT dot_number) AS cnt FROM inspections",
+            "inspections_count",
+        ),
+        _safe_fetchrow(
+            "SELECT COUNT(DISTINCT dot_number) AS cnt FROM crashes",
+            "crashes_count",
+        ),
+        _safe_fetchrow(
+            "SELECT COUNT(DISTINCT dot_number) AS cnt FROM safety",
+            "safety_count",
+        ),
+        _safe_fetchrow(
+            "SELECT COUNT(DISTINCT dot_number) AS cnt FROM insurance_history "
+            "WHERE dot_number IS NOT NULL",
+            "insurance_count",
+        ),
+    )
+
+    # Normalise aggregate row to a plain dict so `.get()` works uniformly.
+    row_d = dict(row) if row else {}
+
+    total = row_d.get("total") or 0
+    active = row_d.get("active") or 0
+    authorized = row_d.get("authorized") or 0
+    brokers = row_d.get("brokers") or 0
+    with_email = row_d.get("with_email") or 0
+    not_authorized = max(total - authorized, 0)
+    other = max(total - active - not_authorized, 0)
+    email_rate = f"{(with_email / total * 100):.1f}" if total else "0"
+
+    result = {
+        # Frontend-expected fields
+        "total": total,
+        "active_carriers": active,
+        "brokers": brokers,
+        "with_email": with_email,
+        "email_rate": email_rate,
+        "with_safety_rating": (safety_row["cnt"] if safety_row else 0) or 0,
+        "with_insurance": (insurance_row["cnt"] if insurance_row else 0) or 0,
+        "with_inspections": (insp_row["cnt"] if insp_row else 0) or 0,
+        "with_crashes": (crash_row["cnt"] if crash_row else 0) or 0,
+        "not_authorized": not_authorized,
+        "other": other,
+        # Backward-compatible legacy fields
+        "active": active,
+        "inactive": max(total - active, 0),
+        "withEmail": with_email,
+        "hazmat": row_d.get("hazmat") or 0,
+        "interstate": row_d.get("interstate") or 0,
+        "intrastate_hm": row_d.get("intrastate_hm") or 0,
+        "intrastate_non_hm": row_d.get("intrastate_non_hm") or 0,
+    }
+    # Only cache when we actually got the main carrier aggregate.
+    if total > 0:
         _dashboard_cache = result
         _dashboard_cache_ts = now
-        return result
-    except Exception as e:
-        print(f"[DB] Error fetching dashboard stats: {e}")
-        return _dashboard_cache or {}
+    return result
 
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
     """No-op: safety data is now in the separate safety table."""
