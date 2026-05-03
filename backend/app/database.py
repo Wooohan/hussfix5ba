@@ -1,4 +1,9 @@
-"""Simplified and Comments Added Into your Code"""
+"""Database layer for the FMCSA Carrier Search application.
+
+Handles PostgreSQL connections via asyncpg and provides query functions
+for carriers, insurance history, inspections, crashes, safety, FMCSA
+register, new ventures, users, and blocked IPs.
+"""
 
 import os
 import json
@@ -528,9 +533,19 @@ def _add_bool_filter(filters, key, column, conditions):
 # Connection pool
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register JSONB codec so JSONB columns are returned as Python dicts."""
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads,
+        schema="pg_catalog", format="text",
+    )
+
+
 async def connect_db() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(
+        DATABASE_URL, min_size=2, max_size=10, init=_init_connection,
+    )
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA_SQL)
 
@@ -588,11 +603,6 @@ def _carrier_row_to_dict(row) -> dict:
     mc = d.get("mc_number")
     mc_parts = [f"MC-{mc}"] if mc else []
     other = d.get("other_dockets")
-    if isinstance(other, str):
-        try:
-            other = json.loads(other)
-        except (json.JSONDecodeError, TypeError):
-            other = None
     if other and isinstance(other, list):
         mc_parts.extend(str(od) for od in other if od)
     mc_number = ", ".join(mc_parts)
@@ -611,13 +621,8 @@ def _carrier_row_to_dict(row) -> dict:
         d.get("carrier_mailing_country") or "",
     )
 
-    # Cargo from JSONB
+    # Cargo from JSONB (auto-decoded by asyncpg JSONB codec)
     cargo = d.get("cargo")
-    if isinstance(cargo, str):
-        try:
-            cargo = json.loads(cargo)
-        except (json.JSONDecodeError, TypeError):
-            cargo = None
     cargo_carried = []
     if cargo and isinstance(cargo, dict):
         other_desc = cargo.get("crgo_cargoothr_desc")
@@ -659,11 +664,6 @@ def _carrier_row_to_dict(row) -> dict:
 
     hm_val = d.get("hm_ind")
     equipment = d.get("equipment")
-    if isinstance(equipment, str):
-        try:
-            equipment = json.loads(equipment)
-        except (json.JSONDecodeError, TypeError):
-            equipment = {}
 
     return {
         "id": dot_number,
@@ -1441,7 +1441,14 @@ async def get_carrier_dashboard_stats() -> dict:
             print(f"[DB] dashboard '{label}' failed: {e}")
             return None
 
-    row, insp_row, crash_row, safety_row, insurance_row = await asyncio.gather(
+    async def _safe_fetch_all(sql, label):
+        try:
+            return await pool.fetch(sql)
+        except Exception as e:
+            print(f"[DB] dashboard '{label}' failed: {e}")
+            return []
+
+    row, insp_row, crash_row, safety_row, insurance_row, monthly_rows = await asyncio.gather(
         _safe_fetch("""
             SELECT
                 COUNT(*) AS total,
@@ -1459,6 +1466,12 @@ async def get_carrier_dashboard_stats() -> dict:
         _safe_fetch("SELECT COUNT(DISTINCT dot_number) AS cnt FROM crashes", "crashes"),
         _safe_fetch("SELECT COUNT(DISTINCT dot_number) AS cnt FROM safety", "safety"),
         _safe_fetch("SELECT COUNT(DISTINCT dot_number) AS cnt FROM insurance_history WHERE dot_number IS NOT NULL", "insurance"),
+        _safe_fetch_all("""
+            SELECT TO_CHAR(add_date, 'YYYY-MM') AS month, COUNT(*) AS count
+            FROM carriers WHERE add_date IS NOT NULL
+            GROUP BY TO_CHAR(add_date, 'YYYY-MM')
+            ORDER BY month DESC LIMIT 12
+        """, "monthly"),
     )
 
     d = dict(row) if row else {}
@@ -1468,6 +1481,18 @@ async def get_carrier_dashboard_stats() -> dict:
     brokers = d.get("brokers") or 0
     with_email = d.get("with_email") or 0
     not_authorized = max(total - authorized, 0)
+
+    # Monthly carrier additions (newest first → reverse for chart chronological order)
+    monthly = [{"month": r["month"], "count": r["count"]} for r in monthly_rows] if monthly_rows else []
+    monthly.reverse()
+
+    # Compute trend: compare latest month to the one before it
+    trend_pct = 0.0
+    if len(monthly) >= 2:
+        prev = monthly[-2]["count"]
+        curr = monthly[-1]["count"]
+        if prev > 0:
+            trend_pct = round((curr - prev) / prev * 100, 1)
 
     result = {
         "total": total,
@@ -1488,6 +1513,8 @@ async def get_carrier_dashboard_stats() -> dict:
         "interstate": d.get("interstate") or 0,
         "intrastate_hm": d.get("intrastate_hm") or 0,
         "intrastate_non_hm": d.get("intrastate_non_hm") or 0,
+        "monthly_additions": monthly,
+        "trend_pct": trend_pct,
     }
     if total > 0:
         _dashboard_cache = result
