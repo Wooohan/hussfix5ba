@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS carriers (
     dba_name                VARCHAR,
     status_code             CHAR(1),
     carrier_operation       CHAR(1),
+    CARSHIP                 CHAR(1),
     classdef                VARCHAR,
     hm_ind                  BOOLEAN,
     add_date                DATE,
