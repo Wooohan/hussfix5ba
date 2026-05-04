@@ -43,13 +43,12 @@ _crashes_dashboard_cache_ts: float = 0.0
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS carriers (
     dot_number              BIGINT,
-    mc_number               BIGINT,
     dockets                 BIGINT,
     legal_name              VARCHAR,
     dba_name                VARCHAR,
     status_code             CHAR(1),
     carrier_operation       CHAR(1),
-    CARSHIP                 CHAR(1),
+    carship                 CHAR(1),
     classdef                VARCHAR,
     hm_ind                  BOOLEAN,
     add_date                DATE,
