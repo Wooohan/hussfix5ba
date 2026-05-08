@@ -1,10 +1,10 @@
 """Database layer for the FMCSA Carrier Search application.
- 
+
 Handles PostgreSQL connections via asyncpg and provides query functions
 for carriers, insurance history, inspections, crashes, safety, FMCSA
 register, new ventures, users, and blocked IPs.
 """
- 
+
 import os
 import json
 import math
@@ -12,21 +12,21 @@ import asyncio
 import time as _time
 from datetime import date as _date
 from typing import Optional
- 
+
 import asyncpg
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 if not DATABASE_URL:
     import warnings
     warnings.warn("DATABASE_URL is not set. Database connections will fail.")
- 
+
 _pool: Optional[asyncpg.Pool] = None
 _DASHBOARD_CACHE_TTL = 7 * 24 * 60 * 60  # 1 week
- 
+
 # In-memory dashboard caches (refreshed after TTL expires)
 _dashboard_cache: Optional[dict] = None
 _dashboard_cache_ts: float = 0.0
@@ -34,33 +34,34 @@ _inspections_dashboard_cache: Optional[dict] = None
 _inspections_dashboard_cache_ts: float = 0.0
 _crashes_dashboard_cache: Optional[dict] = None
 _crashes_dashboard_cache_ts: float = 0.0
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema SQL (reference only — tables are managed externally)
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS carriers (
     dot_number              BIGINT,
+    carship                 VARCHAR,
+    dockets                 JSONB,
     legal_name              VARCHAR,
     dba_name                VARCHAR,
-    status_code             VARCHAR,
-    carrier_operation       VARCHAR,
-    carship                 VARCHAR,
+    status_code             CHAR(1),
+    carrier_operation       CHAR(1),
     classdef                VARCHAR,
     hm_ind                  BOOLEAN,
     add_date                DATE,
     mcs150_date             DATE,
-    mcs150_mileage          NUMERIC,
-    mcs150_mileage_year     NUMERIC,
-    total_cars              NUMERIC,
-    truck_units             NUMERIC,
-    power_units             NUMERIC,
-    fleetsize               NUMERIC,
-    total_drivers           NUMERIC,
-    total_intrastate_drivers NUMERIC,
-    total_cdl               NUMERIC,
+    mcs150_mileage          BIGINT,
+    mcs150_mileage_year     INTEGER,
+    total_cars              INTEGER,
+    truck_units             INTEGER,
+    power_units             INTEGER,
+    fleetsize               INTEGER,
+    total_drivers           INTEGER,
+    total_intrastate_drivers INTEGER,
+    total_cdl               INTEGER,
     avg_drivers_leased_per_month NUMERIC,
     phone                   VARCHAR,
     fax                     VARCHAR,
@@ -95,10 +96,9 @@ CREATE TABLE IF NOT EXISTS carriers (
     intrastate_within_100_miles  BOOLEAN,
     cargo                   JSONB,
     other_dockets           JSONB,
-    equipment               JSONB,
-    dockets                 JSONB
+    equipment               JSONB
 );
- 
+
 CREATE TABLE IF NOT EXISTS insurance_history (
     id                   SERIAL PRIMARY KEY,
     docket_number        VARCHAR(20),
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS insurance_history (
     cancl_effective_date DATE,
     mc_num               BIGINT
 );
- 
+
 CREATE TABLE IF NOT EXISTS inspections (
     unique_id            BIGINT,
     report_number        TEXT,
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS inspections (
     vh_maint_viol        BIGINT,
     hm_viol              DOUBLE PRECISION
 );
- 
+
 CREATE TABLE IF NOT EXISTS crashes (
     report_number              TEXT,
     report_seq_no              INTEGER,
@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS crashes (
     seq_num                    INTEGER,
     not_preventable            BOOLEAN
 );
- 
+
 CREATE TABLE IF NOT EXISTS safety (
     dot_number              BIGINT,
     insp_total              INTEGER,
@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS safety (
     veh_maint_ac            VARCHAR(255),
     type                    VARCHAR(50)
 );
- 
+
 CREATE TABLE IF NOT EXISTS fmcsa_register (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     number       TEXT NOT NULL,
@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS fmcsa_register (
     updated_at   TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(number, date_fetched)
 );
- 
+
 CREATE TABLE IF NOT EXISTS users (
     id                      UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id                 TEXT NOT NULL UNIQUE,
@@ -238,7 +238,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     updated_at              TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 CREATE TABLE IF NOT EXISTS blocked_ips (
     id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     ip_address TEXT NOT NULL UNIQUE,
@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
     blocked_at TIMESTAMPTZ DEFAULT NOW(),
     blocked_by TEXT
 );
- 
+
 CREATE TABLE IF NOT EXISTS new_ventures (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     dot_number TEXT,
@@ -317,13 +317,13 @@ CREATE TABLE IF NOT EXISTS new_ventures (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(dot_number, add_date)
 );
- 
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number    ON carriers (dot_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dockets       ON carriers USING GIN (dockets);
 CREATE INDEX IF NOT EXISTS idx_carriers_status_lname  ON carriers (status_code, legal_name);
 CREATE INDEX IF NOT EXISTS idx_carriers_broker        ON carriers (status_code, legal_name) WHERE classdef ILIKE '%broker%';
 CREATE INDEX IF NOT EXISTS idx_carriers_cargo         ON carriers USING GIN (cargo);
-CREATE INDEX IF NOT EXISTS idx_carriers_dockets       ON carriers USING GIN (dockets);
 CREATE INDEX IF NOT EXISTS idx_ih_docket_type         ON insurance_history (docket_number, ins_type_desc);
 CREATE INDEX IF NOT EXISTS idx_ih_mc_num              ON insurance_history (mc_num);
 CREATE INDEX IF NOT EXISTS idx_ih_effective_date      ON insurance_history (effective_date);
@@ -332,29 +332,29 @@ CREATE INDEX IF NOT EXISTS idx_insurance_history_dot   ON insurance_history (dot
 CREATE INDEX IF NOT EXISTS idx_inspections_dot_number  ON inspections (dot_number);
 CREATE INDEX IF NOT EXISTS idx_crashes_dot_number      ON crashes (dot_number);
 CREATE INDEX IF NOT EXISTS idx_safety_dot_number       ON safety (dot_number);
- 
+
 -- Timestamp triggers
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$ LANGUAGE plpgsql;
- 
+
 DROP TRIGGER IF EXISTS trg_carriers_updated_at ON carriers;
 CREATE TRIGGER trg_carriers_updated_at BEFORE UPDATE ON carriers
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
- 
+
 DROP TRIGGER IF EXISTS trg_fmcsa_register_updated_at ON fmcsa_register;
 CREATE TRIGGER trg_fmcsa_register_updated_at BEFORE UPDATE ON fmcsa_register
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
- 
+
 DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
 CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 """
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Lookup maps
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 CARGO_TYPES = [
     "General Freight", "Household Goods", "Metal Sheets", "Motor Vehicles",
     "Drive/Tow away", "Logs, Poles, Beams, Lumber", "Building Materials",
@@ -366,11 +366,11 @@ CARGO_TYPES = [
     "Paper Products", "Utilities", "Agricultural/Farm Supplies",
     "Construction", "Water Well", "Other",
 ]
- 
+
 _CARRIER_OP_MAP = {"A": "Interstate", "B": "Intrastate Only (HM)", "C": "Intrastate Only (Non-HM)"}
 _STATUS_MAP = {"A": "Active", "I": "Inactive", "P": "Pending"}
 _DOCKET_STATUS_MAP = {"A": "AUTHORIZED", "I": "NOT AUTHORIZED", "P": "PENDING"}
- 
+
 _INS_TYPE_PATTERN = {"BI&PD": "BIPD%", "CARGO": "CARGO", "BOND": "SURETY", "TRUST FUND": "TRUST FUND"}
 _INSURANCE_COMPANY_PATTERNS = {
     "GREAT WEST CASUALTY": ["GREAT WEST%"],
@@ -385,12 +385,12 @@ _INSURANCE_COMPANY_PATTERNS = {
     "SENTRY": ["SENTRY%"],
     "TRAVELERS": ["TRAVELERS%"],
 }
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared column lists
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 _CARRIER_COLS = """c.dot_number, c.dockets, c.carship, c.legal_name, c.dba_name,
     c.phone, c.email_address, c.fax,
     c.power_units, c.total_drivers,
@@ -406,7 +406,7 @@ _CARRIER_COLS = """c.dot_number, c.dockets, c.carship, c.legal_name, c.dba_name,
     c.interstate_beyond_100_miles, c.interstate_within_100_miles,
     c.intrastate_beyond_100_miles, c.intrastate_within_100_miles,
     c.cargo, c.other_dockets, c.equipment"""
- 
+
 _INSPECTION_COLS = """i.unique_id, i.report_number, i.report_state, i.dot_number,
     i.insp_date, i.insp_level_id, i.county_code_state, i.time_weight,
     i.driver_oos_total, i.vehicle_oos_total, i.total_hazmat_sent, i.oos_total,
@@ -419,7 +419,7 @@ _INSPECTION_COLS = """i.unique_id, i.report_number, i.report_state, i.dot_number
     i.vh_maint_insp, i.hm_insp,
     i.basic_viol, i.unsafe_viol, i.fatigued_viol, i.dr_fitness_viol,
     i.subt_alcohol_viol, i.vh_maint_viol, i.hm_viol"""
- 
+
 _NV_COLUMNS = [
     "dot_number", "prefix", "docket_number", "status_code", "carship",
     "carrier_operation", "name", "name_dba", "add_date", "chgn_date",
@@ -460,26 +460,26 @@ _NV_COLUMNS = [
     "tia_tool_free", "tia_fax", "tia_email", "tia_website",
     "phy_ups_store", "mai_ups_store", "phy_mail_box", "mai_mail_box",
 ]
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 def _parse_date(s: str) -> _date:
     """Parse 'YYYY-MM-DD' string to datetime.date for asyncpg."""
     y, m, d = s.split("-")
     return _date(int(y), int(m), int(d))
- 
- 
+
+
 def _safe_int(value, default=0):
     """Safely convert a value to int, returning default on failure."""
     try:
         return int(value) if value is not None else default
     except (ValueError, TypeError):
         return default
- 
- 
+
+
 def _safe_float(value):
     """Return float or None; treat NaN as None."""
     if value is None:
@@ -487,28 +487,28 @@ def _safe_float(value):
     if isinstance(value, float) and math.isnan(value):
         return None
     return float(value)
- 
- 
+
+
 def _str(value) -> str:
     """Safely convert to string, returning '' for None."""
     return (value or "").strip() if isinstance(value, str) else str(value) if value else ""
- 
- 
+
+
 def _build_address(street, city, state, zipcode, country="") -> str:
     parts = [p for p in [street, city, state, zipcode] if p]
     addr = ", ".join(parts)
     if country and country != "US":
         addr = f"{addr}, {country}" if addr else country
     return addr
- 
- 
+
+
 def _format_date(value) -> str:
     """Format a date value to MM/DD/YYYY string."""
     if hasattr(value, "strftime"):
         return value.strftime("%m/%d/%Y")
     return str(value) if value else ""
- 
- 
+
+
 def _add_range_filter(filters, key, column, conditions, params, idx, cast=int):
     """Add min/max range filters for a given column. Returns updated idx."""
     if filters.get(f"{key}_min") is not None:
@@ -520,8 +520,8 @@ def _add_range_filter(filters, key, column, conditions, params, idx, cast=int):
         params.append(cast(filters[f"{key}_max"]))
         idx += 1
     return idx
- 
- 
+
+
 def _add_bool_filter(filters, key, column, conditions):
     """Add a boolean true/false filter."""
     val = filters.get(key)
@@ -529,20 +529,20 @@ def _add_bool_filter(filters, key, column, conditions):
         conditions.append(f"{column} = true")
     elif val == "false":
         conditions.append(f"{column} = false")
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Connection pool
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 async def _init_connection(conn: asyncpg.Connection) -> None:
     """Register JSONB codec so JSONB columns are returned as Python dicts."""
     await conn.set_type_codec(
         "jsonb", encoder=json.dumps, decoder=json.loads,
         schema="pg_catalog", format="text",
     )
- 
- 
+
+
 async def connect_db() -> None:
     global _pool
     _pool = await asyncpg.create_pool(
@@ -550,25 +550,25 @@ async def connect_db() -> None:
     )
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA_SQL)
- 
- 
+
+
 async def close_db() -> None:
     global _pool
     if _pool:
         await _pool.close()
         _pool = None
- 
- 
+
+
 def get_pool() -> asyncpg.Pool:
     if _pool is None:
         raise RuntimeError("Database pool not initialized. Call connect_db() first.")
     return _pool
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Insurance history formatting
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 def _format_insurance_filing(row) -> dict:
     """Format a single insurance_history row for the API response."""
     raw_amount = _str(row.get("max_cov_amount"))
@@ -576,7 +576,7 @@ def _format_insurance_filing(row) -> dict:
         coverage = f"${int(raw_amount) * 1000:,}"
     except (ValueError, TypeError):
         coverage = raw_amount or "N/A"
- 
+
     eff = row.get("effective_date")
     cancl = row.get("cancl_effective_date")
     return {
@@ -591,17 +591,17 @@ def _format_insurance_filing(row) -> dict:
         "canclEffectiveDate": cancl.isoformat() if cancl else "",
         "status": "Cancelled" if cancl else "Active",
     }
- 
- 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Row-to-dict converters
 # ─────────────────────────────────────────────────────────────────────────────
- 
+
 def _carrier_row_to_dict(row) -> dict:
     """Map a carriers row to the API response format."""
     d = dict(row)
- 
-    # MC number display from dockets JSONB array
+
+    # MC number display
     dockets = d.get("dockets")
     mc_parts = []
     if dockets and isinstance(dockets, list):
@@ -610,9 +610,9 @@ def _carrier_row_to_dict(row) -> dict:
     if other and isinstance(other, list):
         mc_parts.extend(str(od) for od in other if od)
     mc_number = ", ".join(mc_parts)
- 
+
     dot_number = str(d.get("dot_number") or "")
- 
+
     # Addresses
     physical_address = _build_address(
         d.get("phy_street") or "", d.get("phy_city") or "",
@@ -624,7 +624,7 @@ def _carrier_row_to_dict(row) -> dict:
         d.get("carrier_mailing_state") or "", d.get("carrier_mailing_zip") or "",
         d.get("carrier_mailing_country") or "",
     )
- 
+
     # Cargo from JSONB (auto-decoded by asyncpg JSONB codec)
     cargo = d.get("cargo")
     cargo_carried = []
@@ -639,17 +639,17 @@ def _carrier_row_to_dict(row) -> dict:
             if "Other" in cargo_carried:
                 cargo_carried.remove("Other")
             cargo_carried.append(str(other_desc).strip())
- 
+
     # Operation & classification
     op_code = _str(d.get("carrier_operation"))
     carrier_operation = [_CARRIER_OP_MAP.get(op_code, op_code)] if op_code else []
     classdef = d.get("classdef") or ""
     classification = [c.strip() for c in classdef.split(";")] if classdef else []
- 
+
     # Status
     status_code = _str(d.get("status_code"))
     docket_code = _str(d.get("docket1_status_code"))
- 
+
     # Territory
     territory = []
     if d.get("interstate_beyond_100_miles"):
@@ -660,15 +660,15 @@ def _carrier_row_to_dict(row) -> dict:
         territory.append("Intrastate (>100 mi)")
     if d.get("intrastate_within_100_miles"):
         territory.append("Intrastate (<100 mi)")
- 
+
     # MCS150
     mileage = d.get("mcs150_mileage")
     mileage_year = d.get("mcs150_mileage_year")
     mcs150_mileage = f"{mileage} ({mileage_year})" if mileage and mileage_year else str(mileage or "")
- 
+
     hm_val = d.get("hm_ind")
     equipment = d.get("equipment")
- 
+
     return {
         "id": dot_number,
         "mc_number": mc_number,
@@ -711,12 +711,12 @@ def _carrier_row_to_dict(row) -> dict:
         "crashes": None,
         "insurance_history_filings": [],
     }
- 
- 
+
+
 def _inspection_row_to_dict(row) -> dict:
     """Convert an inspections row to a dict with both frontend and raw fields."""
     d = dict(row)
- 
+
     # Violation counts
     basic_viol = _safe_int(d.get("basic_viol"))
     unsafe_viol = _safe_int(d.get("unsafe_viol"))
@@ -726,7 +726,7 @@ def _inspection_row_to_dict(row) -> dict:
     vh_maint_viol = _safe_int(d.get("vh_maint_viol"))
     hm_viol = _safe_int(_safe_float(d.get("hm_viol")))
     total_violations = basic_viol + unsafe_viol + fatigued_viol + dr_fitness_viol + subt_alcohol_viol + vh_maint_viol + hm_viol
- 
+
     # Violation list for frontend
     violation_list = []
     for count, label, desc in [
@@ -739,17 +739,17 @@ def _inspection_row_to_dict(row) -> dict:
     ]:
         for _ in range(count):
             violation_list.append({"label": label, "description": desc, "weight": 1})
- 
+
     # Location
     state = d.get("report_state") or ""
     county = d.get("county_code_state") or ""
     location = f"{county}, {state}" if county and county != state else state
- 
+
     oos_total = _safe_int(d.get("oos_total"))
     driver_oos = _safe_int(d.get("driver_oos_total"))
     vehicle_oos = _safe_int(d.get("vehicle_oos_total"))
     hazmat_oos = _safe_int(d.get("hazmat_oos_total"))
- 
+
     return {
         "reportNumber": d.get("report_number") or "",
         "date": d.get("insp_date") or "",
@@ -800,8 +800,8 @@ def _inspection_row_to_dict(row) -> dict:
         "vh_maint_viol": vh_maint_viol,
         "hm_viol": _safe_float(d.get("hm_viol")),
     }
- 
- 
+
+
 def _crash_row_to_dict(row) -> dict:
     """Convert a crashes row to a JSON-serializable dict."""
     d = dict(row)
@@ -811,8 +811,8 @@ def _crash_row_to_dict(row) -> dict:
     for col in ("severity_weight", "time_weight"):
         d[col] = _safe_float(d.get(col))
     return d
- 
- 
+
+
 def _user_row_to_dict(row) -> dict:
     d = dict(row)
     d.pop("password_hash", None)
@@ -822,8 +822,8 @@ def _user_row_to_dict(row) -> dict:
     if "id" in d and d["id"] is not None:
         d["id"] = str(d["id"])
     return d
- 
- 
+
+
 def _new_venture_row_to_dict(row) -> dict:
     d = dict(row)
     raw = d.get("raw_data")
@@ -838,12 +838,12 @@ def _new_venture_row_to_dict(row) -> dict:
     if "id" in d and d["id"] is not None:
         d["id"] = str(d["id"])
     return d
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Carrier CRUD
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def upsert_carrier(record: dict) -> bool:
     pool = get_pool()
     dot = record.get("dot_number") or record.get("dot")
@@ -915,8 +915,8 @@ async def upsert_carrier(record: dict) -> bool:
     except Exception as e:
         print(f"[DB] Error upserting carrier DOT {dot}: {e}")
         return False
- 
- 
+
+
 async def delete_carrier(dot_number: str) -> bool:
     pool = get_pool()
     try:
@@ -927,18 +927,18 @@ async def delete_carrier(dot_number: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting carrier DOT {dot_number}: {e}")
         return False
- 
- 
+
+
 async def update_carrier_insurance(dot_number: str, policies: list) -> bool:
     """No-op — insurance is managed via the insurance_history table."""
     return True
- 
- 
+
+
 async def update_carrier_safety(dot_number: str, safety_data: dict) -> bool:
     """No-op — safety data is managed via the safety table."""
     return True
- 
- 
+
+
 async def get_carrier_count() -> int:
     """Fast estimated count using pg_class (instant on large tables)."""
     pool = get_pool()
@@ -946,32 +946,31 @@ async def get_carrier_count() -> int:
         "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
     )
     return row["cnt"] if row else 0
- 
- 
+
+
 async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
     pool = get_pool()
     try:
-        start_int, end_int = int(start_mc), int(end_mc)
         rows = await pool.fetch(
             f"""SELECT {_CARRIER_COLS} FROM carriers c,
                 LATERAL jsonb_array_elements_text(c.dockets) AS mc_val
                 WHERE mc_val::bigint BETWEEN $1 AND $2
                 ORDER BY mc_val::bigint LIMIT 1000""",
-            start_int, end_int,
+            int(start_mc), int(end_mc),
         )
         return [_carrier_row_to_dict(row) for row in rows]
     except Exception as e:
         print(f"[DB] Error fetching MC range: {e}")
         return []
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Carrier search (main endpoint)
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_carriers(filters: dict) -> dict:
     """Fetch carriers with optional filters.
- 
+
     Uses CTE+JOIN for insurance/safety filters (hash joins via nestloop=off)
     and runs the main query + COUNT in parallel for fast responses.
     """
@@ -979,12 +978,9 @@ async def fetch_carriers(filters: dict) -> dict:
     conditions: list[str] = []
     params: list = []
     idx = 1
-    cte_idx = 0
-    ctes: list[tuple[str, str]] = []
-    joins: list[str] = []
- 
+
     # ── Direct carrier-table filters ─────────────────────────────────────
- 
+
     if filters.get("mc_number"):
         mc_raw = filters["mc_number"].strip().upper()
         mc_num = mc_raw
@@ -994,16 +990,14 @@ async def fetch_carriers(filters: dict) -> dict:
                 break
         try:
             mc_int = int(mc_num)
-            # Search inside dockets JSONB array using containment
             conditions.append(f"c.dockets @> ${idx}")
             params.append([mc_int])
             idx += 1
         except ValueError:
-            # Non-numeric MC — check other_dockets text match
             conditions.append(f"c.other_dockets::text ILIKE ${idx}")
             params.append(f"%{mc_num}%")
             idx += 1
- 
+
     if filters.get("dot_number"):
         dot_val = filters["dot_number"].strip()
         try:
@@ -1014,18 +1008,18 @@ async def fetch_carriers(filters: dict) -> dict:
             conditions.append(f"c.dot_number::text = ${idx}")
             params.append(dot_val)
             idx += 1
- 
+
     if filters.get("legal_name"):
         conditions.append(f"c.legal_name ILIKE ${idx}")
         params.append(f"%{filters['legal_name']}%")
         idx += 1
- 
+
     active = filters.get("active")
     if active == "true":
         conditions.append("c.docket1_status_code = 'A'")
     elif active == "false":
         conditions.append("(c.docket1_status_code IS NULL OR c.docket1_status_code != 'A')")
- 
+
     if filters.get("years_in_business_min"):
         conditions.append(f"c.add_date IS NOT NULL AND c.add_date <= CURRENT_DATE - make_interval(years => ${idx})")
         params.append(int(filters["years_in_business_min"]))
@@ -1034,25 +1028,30 @@ async def fetch_carriers(filters: dict) -> dict:
         conditions.append(f"c.add_date IS NOT NULL AND c.add_date >= CURRENT_DATE - make_interval(years => ${idx})")
         params.append(int(filters["years_in_business_max"]))
         idx += 1
- 
+
     if filters.get("state"):
         states = [s.strip().upper() for s in filters["state"].split("|")]
         conditions.append(f"c.phy_state = ANY(${idx})")
         params.append(states)
         idx += 1
- 
+
     has_email = filters.get("has_email")
     if has_email == "true":
         conditions.append("c.email_address IS NOT NULL AND c.email_address != ''")
     elif has_email == "false":
         conditions.append("(c.email_address IS NULL OR c.email_address = '')")
- 
+
     has_company_rep = filters.get("has_company_rep")
     if has_company_rep == "true":
         conditions.append("c.dba_name IS NOT NULL AND c.dba_name != ''")
     elif has_company_rep == "false":
         conditions.append("(c.dba_name IS NULL OR c.dba_name = '')")
- 
+
+    # ── CTE+JOIN filters (safety & insurance) ────────────────────────────
+    cte_idx = 0
+    ctes: list[tuple[str, str]] = []
+    joins: list[str] = []
+
     entity_type = filters.get("entity_type")
     if entity_type:
         if entity_type.upper() == "BROKER":
@@ -1061,8 +1060,7 @@ async def fetch_carriers(filters: dict) -> dict:
             # Use CTE+NOT IN instead of NOT ILIKE (2x faster — avoids pattern match on 4.4M rows)
             ctes.append(("_brokers", "SELECT dot_number FROM carriers WHERE classdef ILIKE '%broker%'"))
             conditions.append("c.dot_number NOT IN (SELECT dot_number FROM _brokers)")
-            joins.append("")  # no join needed, just the NOT IN condition
- 
+
     if filters.get("classification"):
         classifications = filters["classification"]
         if isinstance(classifications, str):
@@ -1073,7 +1071,7 @@ async def fetch_carriers(filters: dict) -> dict:
             params.append(f"%{cls.strip()}%")
             idx += 1
         conditions.append(f"({' OR '.join(or_clauses)})")
- 
+
     if filters.get("carrier_operation"):
         ops = filters["carrier_operation"]
         if isinstance(ops, str):
@@ -1083,7 +1081,7 @@ async def fetch_carriers(filters: dict) -> dict:
         conditions.append(f"c.carrier_operation = ANY(${idx})")
         params.append(codes)
         idx += 1
- 
+
     if filters.get("cargo"):
         cargo_filter = filters["cargo"]
         if isinstance(cargo_filter, str):
@@ -1097,22 +1095,20 @@ async def fetch_carriers(filters: dict) -> dict:
                 idx += 1
         if or_clauses:
             conditions.append(f"({' OR '.join(or_clauses)})")
- 
+
     hazmat = filters.get("hazmat")
     if hazmat == "true":
         conditions.append("c.hm_ind = TRUE")
     elif hazmat == "false":
         conditions.append("(c.hm_ind IS NULL OR c.hm_ind = FALSE)")
- 
+
     idx = _add_range_filter(filters, "power_units", "c.power_units", conditions, params, idx)
     idx = _add_range_filter(filters, "drivers", "c.total_drivers", conditions, params, idx)
- 
-    # ── CTE+JOIN filters (safety & insurance) ────────────────────────────
- 
+
     def add_safety_cte(name, table, having, join_col="dot_number"):
         ctes.append((name, f"SELECT {join_col} FROM {table} GROUP BY {join_col} HAVING {having}"))
         joins.append(f"INNER JOIN {name} ON {name}.{join_col} = c.{join_col}")
- 
+
     def add_insurance_cte(where_body, extra_where=""):
         nonlocal cte_idx
         name = f"_ifd{cte_idx}"
@@ -1120,46 +1116,46 @@ async def fetch_carriers(filters: dict) -> dict:
         ctes.append((name, f"SELECT DISTINCT dot_number FROM insurance_history WHERE dot_number IS NOT NULL AND ({where_body}){extra}"))
         joins.append(f"INNER JOIN {name} ON {name}.dot_number = c.dot_number")
         cte_idx += 1
- 
+
     # OOS violations
     _oos_conds = []
     idx = _add_range_filter(filters, "oos", "SUM(oos_total)", _oos_conds, params, idx)
     if _oos_conds:
         add_safety_cte("_oos_f", "inspections", " AND ".join(_oos_conds))
- 
+
     # Inspections count
     _insp_conds = []
     idx = _add_range_filter(filters, "inspections", "COUNT(*)", _insp_conds, params, idx)
     if _insp_conds:
         add_safety_cte("_insp_f", "inspections", " AND ".join(_insp_conds))
- 
+
     # Crashes count
     _crash_conds = []
     idx = _add_range_filter(filters, "crashes", "COUNT(*)", _crash_conds, params, idx)
     if _crash_conds:
         add_safety_cte("_crash_f", "crashes", " AND ".join(_crash_conds))
- 
+
     # Injuries
     _inj_conds = []
     idx = _add_range_filter(filters, "injuries", "SUM(injuries)", _inj_conds, params, idx)
     if _inj_conds:
         add_safety_cte("_injuries_f", "crashes", " AND ".join(_inj_conds))
- 
+
     # Fatalities
     _fat_conds = []
     idx = _add_range_filter(filters, "fatalities", "SUM(fatalities)", _fat_conds, params, idx)
     if _fat_conds:
         add_safety_cte("_fatalities_f", "crashes", " AND ".join(_fat_conds))
- 
+
     # Towaway
     _tow_conds = []
     idx = _add_range_filter(filters, "toway", "COUNT(*) FILTER (WHERE tow_away = true)", _tow_conds, params, idx)
     if _tow_conds:
         add_safety_cte("_toway_f", "crashes", " AND ".join(_tow_conds))
- 
+
     # Insurance required
     _ACTIVE_POLICY = "(cancl_effective_date IS NULL)"
- 
+
     if filters.get("insurance_required"):
         ins_types = filters["insurance_required"]
         if isinstance(ins_types, str):
@@ -1171,7 +1167,7 @@ async def fetch_carriers(filters: dict) -> dict:
             params.append(pattern)
             idx += 1
         add_insurance_cte(" OR ".join(or_parts))
- 
+
     # BIPD / Cargo / Bond / Trust Fund on-file
     for filter_key, pattern_val, use_like in [
         ("bipd_on_file", "BIPD%", True),
@@ -1196,7 +1192,7 @@ async def fetch_carriers(filters: dict) -> dict:
             )
             params.append(pattern_val)
             idx += 1
- 
+
     # BIPD amount range
     _bipd_conds = []
     if filters.get("bipd_min"):
@@ -1213,7 +1209,7 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
     if _bipd_conds:
         add_insurance_cte(" AND ".join(_bipd_conds))
- 
+
     # Effective date range
     _eff_conds = []
     if filters.get("ins_effective_date_from"):
@@ -1226,7 +1222,7 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
     if _eff_conds:
         add_insurance_cte("effective_date IS NOT NULL AND " + " AND ".join(_eff_conds))
- 
+
     # Cancellation date range
     _cancl_conds = []
     if filters.get("ins_cancellation_date_from"):
@@ -1239,7 +1235,7 @@ async def fetch_carriers(filters: dict) -> dict:
         idx += 1
     if _cancl_conds:
         add_insurance_cte("cancl_effective_date IS NOT NULL AND " + " AND ".join(_cancl_conds))
- 
+
     # Insurance company
     if filters.get("insurance_company"):
         companies = filters["insurance_company"]
@@ -1256,7 +1252,7 @@ async def fetch_carriers(filters: dict) -> dict:
             f"({' OR '.join(or_parts)}) "
             f"AND (cancl_effective_date IS NULL OR cancl_effective_date >= CURRENT_DATE)"
         )
- 
+
     # Next-renewal-date SQL (computes next anniversary of effective_date)
     _next_renewal_sql = (
         "CASE "
@@ -1287,12 +1283,12 @@ async def fetch_carriers(filters: dict) -> dict:
         "                 + INTERVAL '1 MONTH - 1 DAY'))::int))"
         "END"
     )
- 
+
     _ACTIVE_POLICY_GUARD = (
         "effective_date IS NOT NULL "
         "AND (cancl_effective_date IS NULL OR cancl_effective_date >= CURRENT_DATE)"
     )
- 
+
     # Renewal monthly filter
     if filters.get("renewal_policy_months"):
         months = int(filters["renewal_policy_months"])
@@ -1303,7 +1299,7 @@ async def fetch_carriers(filters: dict) -> dict:
         )
         params.append(months)
         idx += 1
- 
+
     # Renewal date range
     _renewal_conds = []
     _renewal_month_pre = ""
@@ -1329,25 +1325,25 @@ async def fetch_carriers(filters: dict) -> dict:
             f"{_ACTIVE_POLICY_GUARD} AND " + " AND ".join(_renewal_conds),
             extra_where=_renewal_month_pre,
         )
- 
+
     # ── Build and execute query ──────────────────────────────────────────
- 
+
     has_cte = bool(ctes)
     is_filtered = len(conditions) > 0 or has_cte
     if not is_filtered:
         conditions.append("c.status_code = 'A'")
- 
+
     where = " AND ".join(conditions) if conditions else "TRUE"
     limit_val = min(int(filters.get("limit", 500)), 5000)
     offset_val = int(filters.get("offset", 0))
- 
+
     if has_cte:
         cte_prefix = "WITH " + ", ".join(f"{name} AS ({sql})" for name, sql in ctes)
         from_clause = "carriers c " + " ".join(joins)
     else:
         cte_prefix = ""
         from_clause = "carriers c"
- 
+
     query = f"""{cte_prefix}
         SELECT {_CARRIER_COLS}
         FROM {from_clause}
@@ -1355,13 +1351,13 @@ async def fetch_carriers(filters: dict) -> dict:
         ORDER BY c.legal_name ASC
         LIMIT {limit_val} OFFSET {offset_val}
     """
- 
+
     # Count: pg_class for unfiltered, exact COUNT for filtered
     fast_count_query = "SELECT reltuples::bigint AS cnt FROM pg_class WHERE relname = 'carriers'"
- 
+
     try:
         t0 = _time.monotonic()
- 
+
         if not is_filtered:
             rows, count_row = await asyncio.gather(
                 pool.fetch(query, *params),
@@ -1372,44 +1368,29 @@ async def fetch_carriers(filters: dict) -> dict:
             count_query = f"""{cte_prefix}
                 SELECT COUNT(*) as cnt FROM {from_clause} WHERE {where}
             """
- 
+
             async def _run_with_hints(q, conn, fetch_one=False):
-            async def _run_main(conn):
-                t = _time.monotonic()
                 if has_cte:
                     await conn.execute("SET LOCAL enable_nestloop = off")
                 if fetch_one:
                     return await conn.fetchrow(q, *params)
                 return await conn.fetch(q, *params)
-                r = await conn.fetch(query, *params)
-                print(f"[PERF-DETAIL] main_query={int((_time.monotonic()-t)*1000)}ms rows={len(r)}")
-                return r
- 
-            async def _run_count(conn):
-                t = _time.monotonic()
-                if has_cte:
-                    await conn.execute("SET LOCAL enable_nestloop = off")
-                r = await conn.fetchrow(count_query, *params)
-                print(f"[PERF-DETAIL] count_query={int((_time.monotonic()-t)*1000)}ms count={r['cnt'] if r else 0}")
-                return r
- 
+
             async with pool.acquire() as c1, pool.acquire() as c2:
                 async with c1.transaction(), c2.transaction():
                     rows, count_row = await asyncio.gather(
                         _run_with_hints(query, c1),
                         _run_with_hints(count_query, c2, fetch_one=True),
-                        _run_main(c1),
-                        _run_count(c2),
                     )
             filtered_count = count_row["cnt"] if count_row else 0
- 
+
         t1 = _time.monotonic()
- 
+
         # Build carrier dicts
         carrier_dicts = [_carrier_row_to_dict(row) for row in rows]
- 
+
         t2 = _time.monotonic()
- 
+
         # Batch-fetch insurance history by dot_number
         dot_numbers = [int(dict(row).get("dot_number") or 0) for row in rows]
         unique_dots = list(set(d for d in dot_numbers if d))
@@ -1436,43 +1417,43 @@ async def fetch_carriers(filters: dict) -> dict:
                         ]
             except Exception as e:
                 print(f"[DB] Insurance batch-fetch error: {e}")
- 
+
         t3 = _time.monotonic()
         print(f"[PERF] query={int((t1-t0)*1000)}ms dict={int((t2-t1)*1000)}ms insurance={int((t3-t2)*1000)}ms total={int((t3-t0)*1000)}ms rows={len(rows)}")
- 
+
         return {"data": carrier_dicts, "filtered_count": filtered_count}
     except Exception as e:
         print(f"[DB] Error fetching carriers: {e}")
         return {"data": [], "filtered_count": 0}
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Dashboard stats
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def get_carrier_dashboard_stats() -> dict:
     """Carrier dashboard stats (cached for 1 week)."""
     global _dashboard_cache, _dashboard_cache_ts
     now = _time.time()
     if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
         return _dashboard_cache
- 
+
     pool = get_pool()
- 
+
     async def _safe_fetch(sql, label):
         try:
             return await pool.fetchrow(sql)
         except Exception as e:
             print(f"[DB] dashboard '{label}' failed: {e}")
             return None
- 
+
     async def _safe_fetch_all(sql, label):
         try:
             return await pool.fetch(sql)
         except Exception as e:
             print(f"[DB] dashboard '{label}' failed: {e}")
             return []
- 
+
     row, insp_row, crash_row, safety_row, insurance_row, monthly_rows = await asyncio.gather(
         _safe_fetch("""
             SELECT
@@ -1498,7 +1479,7 @@ async def get_carrier_dashboard_stats() -> dict:
             ORDER BY month DESC LIMIT 12
         """, "monthly"),
     )
- 
+
     d = dict(row) if row else {}
     total = d.get("total") or 0
     active = d.get("active") or 0
@@ -1506,11 +1487,11 @@ async def get_carrier_dashboard_stats() -> dict:
     brokers = d.get("brokers") or 0
     with_email = d.get("with_email") or 0
     not_authorized = max(total - authorized, 0)
- 
+
     # Monthly carrier additions (newest first → reverse for chart chronological order)
     monthly = [{"month": r["month"], "count": r["count"]} for r in monthly_rows] if monthly_rows else []
     monthly.reverse()
- 
+
     # Compute trend: compare latest month to the one before it
     trend_pct = 0.0
     if len(monthly) >= 2:
@@ -1518,7 +1499,7 @@ async def get_carrier_dashboard_stats() -> dict:
         curr = monthly[-1]["count"]
         if prev > 0:
             trend_pct = round((curr - prev) / prev * 100, 1)
- 
+
     result = {
         "total": total,
         "active_carriers": active,
@@ -1545,12 +1526,12 @@ async def get_carrier_dashboard_stats() -> dict:
         _dashboard_cache = result
         _dashboard_cache_ts = now
     return result
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Insurance history
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_insurance_history(docket_number: str) -> list[dict]:
     pool = get_pool()
     try:
@@ -1567,34 +1548,34 @@ async def fetch_insurance_history(docket_number: str) -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching insurance history for {docket_number}: {e}")
         return []
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Inspections
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_inspections(filters: dict) -> dict:
     """Fetch inspections with optional filters and pagination."""
     pool = get_pool()
     conditions: list[str] = []
     params: list = []
     idx = 1
- 
+
     if filters.get("dot_number"):
         conditions.append(f"i.dot_number = ${idx}::bigint")
         params.append(int(filters["dot_number"].strip()))
         idx += 1
- 
+
     if filters.get("report_number"):
         conditions.append(f"i.report_number ILIKE ${idx}")
         params.append(f"%{filters['report_number']}%")
         idx += 1
- 
+
     if filters.get("report_state"):
         conditions.append(f"i.report_state = ${idx}")
         params.append(filters["report_state"].upper())
         idx += 1
- 
+
     if filters.get("insp_date_from"):
         conditions.append(f"i.insp_date >= ${idx}")
         params.append(filters["insp_date_from"])
@@ -1603,11 +1584,11 @@ async def fetch_inspections(filters: dict) -> dict:
         conditions.append(f"i.insp_date <= ${idx}")
         params.append(filters["insp_date_to"])
         idx += 1
- 
+
     # Boolean inspection type filters
     for key in ("unsafe_insp", "fatigued_insp", "dr_fitness_insp", "subt_alcohol_insp", "vh_maint_insp", "hm_insp"):
         _add_bool_filter(filters, key, f"i.{key}", conditions)
- 
+
     # Numeric range filters
     for key, col in [
         ("oos", "i.oos_total"), ("driver_oos", "i.driver_oos_total"),
@@ -1617,7 +1598,7 @@ async def fetch_inspections(filters: dict) -> dict:
         ("subt_alcohol_viol", "i.subt_alcohol_viol"), ("vh_maint_viol", "i.vh_maint_viol"),
     ]:
         idx = _add_range_filter(filters, key, col, conditions, params, idx)
- 
+
     if filters.get("hm_viol_min") is not None:
         conditions.append(f"i.hm_viol >= ${idx}")
         params.append(float(filters["hm_viol_min"]))
@@ -1626,14 +1607,14 @@ async def fetch_inspections(filters: dict) -> dict:
         conditions.append(f"i.hm_viol <= ${idx}")
         params.append(float(filters["hm_viol_max"]))
         idx += 1
- 
+
     where = " AND ".join(conditions) if conditions else "TRUE"
     limit_val = min(int(filters.get("limit", 500)), 5000)
     offset_val = int(filters.get("offset", 0))
- 
+
     query = f"SELECT {_INSPECTION_COLS} FROM inspections i WHERE {where} ORDER BY i.insp_date DESC, i.unique_id DESC LIMIT {limit_val} OFFSET {offset_val}"
     count_query = f"SELECT COUNT(*) as cnt FROM inspections i WHERE {where}"
- 
+
     try:
         rows, count_row = await asyncio.gather(
             pool.fetch(query, *params),
@@ -1646,8 +1627,8 @@ async def fetch_inspections(filters: dict) -> dict:
     except Exception as e:
         print(f"[DB] Error fetching inspections: {e}")
         return {"data": [], "filtered_count": 0}
- 
- 
+
+
 async def get_inspections_count() -> int:
     pool = get_pool()
     try:
@@ -1656,15 +1637,15 @@ async def get_inspections_count() -> int:
     except Exception as e:
         print(f"[DB] Error getting inspections count: {e}")
         return 0
- 
- 
+
+
 async def get_inspections_dashboard_stats() -> dict:
     """Inspections dashboard stats (cached for 1 week)."""
     global _inspections_dashboard_cache, _inspections_dashboard_cache_ts
     now = _time.time()
     if _inspections_dashboard_cache and (now - _inspections_dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
         return _inspections_dashboard_cache
- 
+
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -1703,8 +1684,8 @@ async def get_inspections_dashboard_stats() -> dict:
     except Exception as e:
         print(f"[DB] Error fetching inspections dashboard stats: {e}")
         return _inspections_dashboard_cache or {}
- 
- 
+
+
 async def fetch_inspection_by_id(unique_id: int) -> dict | None:
     pool = get_pool()
     try:
@@ -1713,8 +1694,8 @@ async def fetch_inspection_by_id(unique_id: int) -> dict | None:
     except Exception as e:
         print(f"[DB] Error fetching inspection {unique_id}: {e}")
         return None
- 
- 
+
+
 async def fetch_inspections_by_dot(dot_number: int, limit: int = 10, offset: int = 0) -> dict:
     """Fetch paginated inspections for a DOT number."""
     pool = get_pool()
@@ -1735,19 +1716,19 @@ async def fetch_inspections_by_dot(dot_number: int, limit: int = 10, offset: int
     except Exception as e:
         print(f"[DB] Error fetching inspections for DOT {dot_number}: {e}")
         return {"data": [], "total": 0}
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Crashes
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_crashes(filters: dict) -> dict:
     """Fetch crashes with optional filters and pagination."""
     pool = get_pool()
     conditions: list[str] = []
     params: list = []
     idx = 1
- 
+
     if filters.get("dot_number"):
         try:
             conditions.append(f"dot_number = ${idx}")
@@ -1757,17 +1738,17 @@ async def fetch_crashes(filters: dict) -> dict:
             conditions.append(f"dot_number::text = ${idx}")
             params.append(filters["dot_number"].strip())
             idx += 1
- 
+
     if filters.get("report_number"):
         conditions.append(f"report_number ILIKE ${idx}")
         params.append(f"%{filters['report_number']}%")
         idx += 1
- 
+
     if filters.get("report_state"):
         conditions.append(f"report_state = ${idx}")
         params.append(filters["report_state"].upper())
         idx += 1
- 
+
     if filters.get("report_date_from"):
         conditions.append(f"report_date >= ${idx}::date")
         params.append(filters["report_date_from"])
@@ -1776,27 +1757,27 @@ async def fetch_crashes(filters: dict) -> dict:
         conditions.append(f"report_date <= ${idx}::date")
         params.append(filters["report_date_to"])
         idx += 1
- 
+
     idx = _add_range_filter(filters, "fatalities", "fatalities", conditions, params, idx)
     idx = _add_range_filter(filters, "injuries", "injuries", conditions, params, idx)
- 
+
     _add_bool_filter(filters, "tow_away", "tow_away", conditions)
     _add_bool_filter(filters, "not_preventable", "not_preventable", conditions)
- 
+
     if filters.get("weather_condition_desc"):
         conditions.append(f"weather_condition_desc ILIKE ${idx}")
         params.append(f"%{filters['weather_condition_desc']}%")
         idx += 1
- 
+
     if filters.get("vehicle_id_number"):
         conditions.append(f"vehicle_id_number ILIKE ${idx}")
         params.append(f"%{filters['vehicle_id_number']}%")
         idx += 1
- 
+
     where = " AND ".join(conditions) if conditions else "TRUE"
     limit_val = min(int(filters.get("limit", 500)), 5000)
     offset_val = int(filters.get("offset", 0))
- 
+
     query = f"""
         SELECT report_number, report_seq_no, dot_number, report_date,
             report_state, fatalities, injuries, tow_away, hazmat_released,
@@ -1809,7 +1790,7 @@ async def fetch_crashes(filters: dict) -> dict:
         LIMIT {limit_val} OFFSET {offset_val}
     """
     count_query = f"SELECT COUNT(*) as cnt FROM crashes WHERE {where}"
- 
+
     try:
         rows, count_row = await asyncio.gather(
             pool.fetch(query, *params),
@@ -1822,8 +1803,8 @@ async def fetch_crashes(filters: dict) -> dict:
     except Exception as e:
         print(f"[DB] Error fetching crashes: {e}")
         return {"data": [], "filtered_count": 0}
- 
- 
+
+
 async def get_crashes_count() -> int:
     pool = get_pool()
     try:
@@ -1832,15 +1813,15 @@ async def get_crashes_count() -> int:
     except Exception as e:
         print(f"[DB] Error getting crashes count: {e}")
         return 0
- 
- 
+
+
 async def get_crashes_dashboard_stats() -> dict:
     """Crashes dashboard stats (cached for 1 week)."""
     global _crashes_dashboard_cache, _crashes_dashboard_cache_ts
     now = _time.time()
     if _crashes_dashboard_cache and (now - _crashes_dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
         return _crashes_dashboard_cache
- 
+
     pool = get_pool()
     try:
         row = await pool.fetchrow("""
@@ -1871,8 +1852,8 @@ async def get_crashes_dashboard_stats() -> dict:
     except Exception as e:
         print(f"[DB] Error fetching crashes dashboard stats: {e}")
         return _crashes_dashboard_cache or {}
- 
- 
+
+
 async def fetch_crash_by_report(report_number: str) -> dict | None:
     pool = get_pool()
     try:
@@ -1881,8 +1862,8 @@ async def fetch_crash_by_report(report_number: str) -> dict | None:
     except Exception as e:
         print(f"[DB] Error fetching crash {report_number}: {e}")
         return None
- 
- 
+
+
 async def fetch_crashes_by_dot(dot_number: str, limit: int = 10, offset: int = 0) -> dict:
     """Fetch paginated crashes for a DOT number."""
     pool = get_pool()
@@ -1907,12 +1888,12 @@ async def fetch_crashes_by_dot(dot_number: str, limit: int = 10, offset: int = 0
     except Exception as e:
         print(f"[DB] Error fetching crashes for DOT {dot_number}: {e}")
         return {"data": [], "total": 0}
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Safety
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_safety_by_dot(dot_number: str) -> dict | None:
     """Fetch safety/BASIC scores for a carrier."""
     pool = get_pool()
@@ -1925,14 +1906,14 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
         if not row:
             return None
         d = dict(row)
- 
+
         driver_insp = d.get("driver_insp_total") or 0
         driver_oos = d.get("driver_oos_insp_total") or 0
         vehicle_insp = d.get("vehicle_insp_total") or 0
         vehicle_oos = d.get("vehicle_oos_insp_total") or 0
         driver_oos_rate = round((driver_oos / driver_insp) * 100, 1) if driver_insp > 0 else 0.0
         vehicle_oos_rate = round((vehicle_oos / vehicle_insp) * 100, 1) if vehicle_insp > 0 else 0.0
- 
+
         basic_scores = []
         for key, label in [
             ("unsafe_driv", "Unsafe Driving"),
@@ -1948,7 +1929,7 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
                 "inspWithViol": d.get(f"{key}_insp_w_viol") or 0,
                 "alert": _str(d.get(f"{key}_ac")),
             })
- 
+
         return {
             "dot_number": str(d.get("dot_number", "")),
             "type": _str(d.get("type")),
@@ -1968,17 +1949,17 @@ async def fetch_safety_by_dot(dot_number: str) -> dict | None:
     except Exception as e:
         print(f"[DB] Error fetching safety for DOT {dot_number}: {e}")
         return None
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # FMCSA Register
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) -> dict:
     pool = get_pool()
     if not entries:
         return {"success": True, "saved": 0, "skipped": 0}
- 
+
     saved = 0
     skipped = 0
     try:
@@ -2004,8 +1985,8 @@ async def save_fmcsa_register_entries(entries: list[dict], extracted_date: str) 
         print(f"[DB] Error batch-saving FMCSA entries: {e}")
         skipped = len(entries) - saved
     return {"success": True, "saved": saved, "skipped": skipped}
- 
- 
+
+
 async def fetch_fmcsa_register_by_date(
     extracted_date: str,
     category: Optional[str] = None,
@@ -2015,7 +1996,7 @@ async def fetch_fmcsa_register_by_date(
     conditions = ["date_fetched = $1"]
     params: list = [extracted_date]
     idx = 2
- 
+
     if category:
         conditions.append(f"category = ${idx}")
         params.append(category)
@@ -2024,23 +2005,23 @@ async def fetch_fmcsa_register_by_date(
         conditions.append(f"(title ILIKE ${idx} OR number ILIKE ${idx})")
         params.append(f"%{search_term}%")
         idx += 1
- 
+
     where = " AND ".join(conditions)
     rows = await pool.fetch(
         f"SELECT number, title, decided, category, date_fetched FROM fmcsa_register WHERE {where} ORDER BY number LIMIT 10000",
         *params,
     )
     return [dict(row) for row in rows]
- 
- 
+
+
 async def get_fmcsa_extracted_dates() -> list[str]:
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT DISTINCT date_fetched FROM fmcsa_register ORDER BY date_fetched DESC"
     )
     return [row["date_fetched"] for row in rows]
- 
- 
+
+
 async def get_fmcsa_categories() -> list[str]:
     pool = get_pool()
     try:
@@ -2051,8 +2032,8 @@ async def get_fmcsa_categories() -> list[str]:
     except Exception as e:
         print(f"[DB] Error fetching FMCSA categories: {e}")
         return []
- 
- 
+
+
 async def delete_fmcsa_entries_before_date(date: str) -> int:
     pool = get_pool()
     try:
@@ -2062,28 +2043,28 @@ async def delete_fmcsa_entries_before_date(date: str) -> int:
     except Exception as e:
         print(f"[DB] Error deleting FMCSA entries: {e}")
         return 0
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # New Ventures
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dict:
     pool = get_pool()
     if not entries:
         return {"success": True, "saved": 0, "skipped": 0}
- 
+
     cols = _NV_COLUMNS + ["raw_data", "scrape_date"]
     col_list = ", ".join(cols)
     placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
     update_cols = [c for c in cols if c not in ("dot_number", "add_date")]
     on_conflict_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols) + ", updated_at = NOW()"
- 
+
     insert_sql = f"""
         INSERT INTO new_ventures ({col_list}) VALUES ({placeholders})
         ON CONFLICT (dot_number, add_date) DO UPDATE SET {on_conflict_set}
     """
- 
+
     saved = 0
     skipped = 0
     try:
@@ -2106,29 +2087,29 @@ async def save_new_venture_entries(entries: list[dict], scrape_date: str) -> dic
         print(f"[DB] Error batch-saving new venture entries: {e}")
         skipped = len(entries) - saved
     return {"success": True, "saved": saved, "skipped": skipped}
- 
- 
+
+
 async def fetch_new_ventures(filters: dict) -> list[dict]:
     pool = get_pool()
     conditions: list[str] = []
     params: list = []
     idx = 1
- 
+
     if filters.get("docket_number"):
         conditions.append(f"docket_number ILIKE ${idx}")
         params.append(f"%{filters['docket_number']}%")
         idx += 1
- 
+
     if filters.get("dot_number"):
         conditions.append(f"dot_number ILIKE ${idx}")
         params.append(f"%{filters['dot_number']}%")
         idx += 1
- 
+
     if filters.get("company_name"):
         conditions.append(f"(name ILIKE ${idx} OR name_dba ILIKE ${idx})")
         params.append(f"%{filters['company_name']}%")
         idx += 1
- 
+
     if filters.get("date_from"):
         conditions.append(f"add_date >= ${idx}")
         params.append(filters["date_from"])
@@ -2137,7 +2118,7 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         conditions.append(f"add_date <= ${idx}")
         params.append(filters["date_to"])
         idx += 1
- 
+
     active = filters.get("active")
     if active in ("active", "true"):
         conditions.append(f"((operating_status ILIKE ${idx} AND operating_status NOT ILIKE ${idx + 1}) OR operating_status ILIKE ${idx + 2})")
@@ -2159,7 +2140,7 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
         conditions.append(f"operating_status NOT ILIKE ${idx}")
         params.append("%AUTHORIZED%")
         idx += 1
- 
+
     if filters.get("state"):
         states = [s.strip().upper() for s in filters["state"].split("|") if s.strip()]
         if len(states) == 1:
@@ -2171,36 +2152,36 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
             conditions.append(f"phy_st IN ({placeholders})")
             params.extend(states)
             idx += len(states)
- 
+
     has_email = filters.get("has_email")
     if has_email == "true":
         conditions.append("email_address IS NOT NULL AND email_address != ''")
     elif has_email == "false":
         conditions.append("(email_address IS NULL OR email_address = '')")
- 
+
     if filters.get("carrier_operation"):
         conditions.append(f"carrier_operation ILIKE ${idx}")
         params.append(f"%{filters['carrier_operation']}%")
         idx += 1
- 
+
     if filters.get("hazmat") == "true":
         conditions.append("hm_ind = 'Y'")
     elif filters.get("hazmat") == "false":
         conditions.append("(hm_ind IS NULL OR hm_ind != 'Y')")
- 
+
     idx = _add_range_filter(filters, "power_units", "total_pwr", conditions, params, idx)
     idx = _add_range_filter(filters, "drivers", "total_drivers", conditions, params, idx)
- 
+
     for key, col in [("bipd_on_file", "bipd_file"), ("cargo_on_file", "cargo_file"), ("bond_on_file", "bond_file")]:
         if filters.get(key) == "true":
             conditions.append(f"{col} = 'Y'")
         elif filters.get(key) == "false":
             conditions.append(f"({col} IS NULL OR {col} != 'Y')")
- 
+
     where = " AND ".join(conditions) if conditions else "TRUE"
     limit_val = int(filters.get("limit", 200 if not conditions else 10000))
     offset_val = int(filters.get("offset", 0))
- 
+
     try:
         rows = await pool.fetch(
             f"SELECT * FROM new_ventures WHERE {where} ORDER BY created_at DESC LIMIT {limit_val} OFFSET {offset_val}",
@@ -2218,8 +2199,8 @@ async def fetch_new_ventures(filters: dict) -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching new ventures: {e}")
         return {"data": [], "filtered_count": 0, "total_count": 0, "available_dates": []}
- 
- 
+
+
 async def get_new_venture_count() -> int:
     pool = get_pool()
     try:
@@ -2228,8 +2209,8 @@ async def get_new_venture_count() -> int:
     except Exception as e:
         print(f"[DB] Error getting new venture count: {e}")
         return 0
- 
- 
+
+
 async def get_new_venture_scraped_dates() -> list[str]:
     pool = get_pool()
     try:
@@ -2240,8 +2221,8 @@ async def get_new_venture_scraped_dates() -> list[str]:
     except Exception as e:
         print(f"[DB] Error fetching new venture dates: {e}")
         return []
- 
- 
+
+
 async def fetch_new_venture_by_id(record_id: str) -> dict | None:
     pool = get_pool()
     try:
@@ -2250,8 +2231,8 @@ async def fetch_new_venture_by_id(record_id: str) -> dict | None:
     except Exception as e:
         print(f"[DB] Error fetching new venture {record_id}: {e}")
         return None
- 
- 
+
+
 async def delete_new_venture(record_id: str) -> bool:
     pool = get_pool()
     try:
@@ -2260,12 +2241,12 @@ async def delete_new_venture(record_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting new venture {record_id}: {e}")
         return False
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Users & Auth
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_users() -> list[dict]:
     pool = get_pool()
     try:
@@ -2278,8 +2259,8 @@ async def fetch_users() -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching users: {e}")
         return []
- 
- 
+
+
 async def fetch_user_by_email(email: str) -> Optional[dict]:
     pool = get_pool()
     try:
@@ -2293,8 +2274,8 @@ async def fetch_user_by_email(email: str) -> Optional[dict]:
     except Exception as e:
         print(f"[DB] Error fetching user by email: {e}")
         return None
- 
- 
+
+
 async def create_user(user_data: dict) -> Optional[dict]:
     pool = get_pool()
     try:
@@ -2321,8 +2302,8 @@ async def create_user(user_data: dict) -> Optional[dict]:
     except Exception as e:
         print(f"[DB] Error creating user: {e}")
         return None
- 
- 
+
+
 async def update_user(user_id: str, user_data: dict) -> bool:
     pool = get_pool()
     _ALLOWED = {"name", "role", "plan", "daily_limit", "records_extracted_today",
@@ -2344,8 +2325,8 @@ async def update_user(user_id: str, user_data: dict) -> bool:
     except Exception as e:
         print(f"[DB] Error updating user {user_id}: {e}")
         return False
- 
- 
+
+
 async def delete_user(user_id: str) -> bool:
     pool = get_pool()
     try:
@@ -2354,8 +2335,8 @@ async def delete_user(user_id: str) -> bool:
     except Exception as e:
         print(f"[DB] Error deleting user {user_id}: {e}")
         return False
- 
- 
+
+
 async def get_user_password_hash(email: str) -> Optional[str]:
     pool = get_pool()
     try:
@@ -2364,12 +2345,12 @@ async def get_user_password_hash(email: str) -> Optional[str]:
     except Exception as e:
         print(f"[DB] Error fetching password hash: {e}")
         return None
- 
- 
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Blocked IPs
 # ═════════════════════════════════════════════════════════════════════════════
- 
+
 async def fetch_blocked_ips() -> list[dict]:
     pool = get_pool()
     try:
@@ -2378,8 +2359,8 @@ async def fetch_blocked_ips() -> list[dict]:
     except Exception as e:
         print(f"[DB] Error fetching blocked IPs: {e}")
         return []
- 
- 
+
+
 async def block_ip(ip_address: str, reason: str) -> bool:
     pool = get_pool()
     try:
@@ -2391,8 +2372,8 @@ async def block_ip(ip_address: str, reason: str) -> bool:
     except Exception as e:
         print(f"[DB] Error blocking IP {ip_address}: {e}")
         return False
- 
- 
+
+
 async def unblock_ip(ip_address: str) -> bool:
     pool = get_pool()
     try:
@@ -2401,8 +2382,8 @@ async def unblock_ip(ip_address: str) -> bool:
     except Exception as e:
         print(f"[DB] Error unblocking IP {ip_address}: {e}")
         return False
- 
- 
+
+
 async def is_ip_blocked(ip_address: str) -> bool:
     pool = get_pool()
     try:
