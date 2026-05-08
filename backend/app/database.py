@@ -1369,19 +1369,10 @@ async def fetch_carriers(filters: dict) -> dict:
                 SELECT COUNT(*) as cnt FROM {from_clause} WHERE {where}
             """
 
-            async def _run_with_hints(q, conn, fetch_one=False):
-                if has_cte:
-                    await conn.execute("SET LOCAL enable_nestloop = off")
-                if fetch_one:
-                    return await conn.fetchrow(q, *params)
-                return await conn.fetch(q, *params)
-
-            async with pool.acquire() as c1, pool.acquire() as c2:
-                async with c1.transaction(), c2.transaction():
-                    rows, count_row = await asyncio.gather(
-                        _run_with_hints(query, c1),
-                        _run_with_hints(count_query, c2, fetch_one=True),
-                    )
+            rows, count_row = await asyncio.gather(
+                pool.fetch(query, *params),
+                pool.fetchrow(count_query, *params),
+            )
             filtered_count = count_row["cnt"] if count_row else 0
 
         t1 = _time.monotonic()
