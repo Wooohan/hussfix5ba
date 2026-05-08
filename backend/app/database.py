@@ -43,8 +43,8 @@ _crashes_dashboard_cache_ts: float = 0.0
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS carriers (
     dot_number              BIGINT,
-    mc_number               BIGINT,
-    dockets                 BIGINT,
+    carship                 VARCHAR,
+    dockets                 JSONB,
     legal_name              VARCHAR,
     dba_name                VARCHAR,
     status_code             CHAR(1),
@@ -320,7 +320,7 @@ CREATE TABLE IF NOT EXISTS new_ventures (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_carriers_dot_number    ON carriers (dot_number);
-CREATE INDEX IF NOT EXISTS idx_carriers_mc_number     ON carriers (mc_number);
+CREATE INDEX IF NOT EXISTS idx_carriers_dockets       ON carriers USING GIN (dockets);
 CREATE INDEX IF NOT EXISTS idx_carriers_status_lname  ON carriers (status_code, legal_name);
 CREATE INDEX IF NOT EXISTS idx_carriers_broker        ON carriers (status_code, legal_name) WHERE classdef ILIKE '%broker%';
 CREATE INDEX IF NOT EXISTS idx_carriers_cargo         ON carriers USING GIN (cargo);
@@ -391,7 +391,7 @@ _INSURANCE_COMPANY_PATTERNS = {
 # Shared column lists
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CARRIER_COLS = """c.dot_number, c.mc_number, c.dockets, c.legal_name, c.dba_name,
+_CARRIER_COLS = """c.dot_number, c.dockets, c.carship, c.legal_name, c.dba_name,
     c.phone, c.email_address, c.fax,
     c.power_units, c.total_drivers,
     c.phy_street, c.phy_city, c.phy_state, c.phy_zip, c.phy_country,
@@ -602,8 +602,10 @@ def _carrier_row_to_dict(row) -> dict:
     d = dict(row)
 
     # MC number display
-    mc = d.get("mc_number")
-    mc_parts = [f"MC-{mc}"] if mc else []
+    dockets = d.get("dockets")
+    mc_parts = []
+    if dockets and isinstance(dockets, list):
+        mc_parts.extend(f"MC-{dn}" for dn in dockets if dn)
     other = d.get("other_dockets")
     if other and isinstance(other, list):
         mc_parts.extend(str(od) for od in other if od)
@@ -856,14 +858,14 @@ async def upsert_carrier(record: dict) -> bool:
                 carrier_mailing_street, carrier_mailing_city, carrier_mailing_state, carrier_mailing_zip,
                 mcs150_date, mcs150_mileage, mcs150_mileage_year,
                 classdef, carrier_operation, hm_ind,
-                dun_bradstreet_no, status_code, mc_number
+                dun_bradstreet_no, status_code
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19,
                 $20, $21, $22,
-                $23, $24, $25
+                $23, $24
             )
             ON CONFLICT (dot_number) DO UPDATE SET
                 legal_name = EXCLUDED.legal_name,
@@ -882,8 +884,7 @@ async def upsert_carrier(record: dict) -> bool:
                 carrier_operation = EXCLUDED.carrier_operation,
                 hm_ind = EXCLUDED.hm_ind,
                 dun_bradstreet_no = EXCLUDED.dun_bradstreet_no,
-                status_code = EXCLUDED.status_code,
-                mc_number = EXCLUDED.mc_number
+                status_code = EXCLUDED.status_code
             """,
             int(dot),
             record.get("legal_name"),
@@ -909,7 +910,6 @@ async def upsert_carrier(record: dict) -> bool:
             record.get("hm_ind"),
             record.get("dun_bradstreet_no", record.get("duns_number")),
             record.get("status_code"),
-            record.get("mc_number"),
         )
         return True
     except Exception as e:
@@ -952,9 +952,10 @@ async def get_carriers_by_mc_range(start_mc: str, end_mc: str) -> list[dict]:
     pool = get_pool()
     try:
         rows = await pool.fetch(
-            f"SELECT {_CARRIER_COLS} FROM carriers c "
-            "WHERE mc_number IS NOT NULL AND mc_number BETWEEN $1 AND $2 "
-            "ORDER BY mc_number LIMIT 1000",
+            f"""SELECT {_CARRIER_COLS} FROM carriers c,
+                LATERAL jsonb_array_elements_text(c.dockets) AS mc_val
+                WHERE mc_val::bigint BETWEEN $1 AND $2
+                ORDER BY mc_val::bigint LIMIT 1000""",
             int(start_mc), int(end_mc),
         )
         return [_carrier_row_to_dict(row) for row in rows]
@@ -988,12 +989,13 @@ async def fetch_carriers(filters: dict) -> dict:
                 mc_num = mc_raw[len(pfx):].lstrip("-").strip()
                 break
         try:
-            conditions.append(f"c.mc_number = ${idx}")
-            params.append(int(mc_num))
+            mc_int = int(mc_num)
+            conditions.append(f"c.dockets @> ${idx}")
+            params.append([mc_int])
             idx += 1
         except ValueError:
-            conditions.append(f"c.mc_number::text = ${idx}")
-            params.append(mc_num)
+            conditions.append(f"c.other_dockets::text ILIKE ${idx}")
+            params.append(f"%{mc_num}%")
             idx += 1
 
     if filters.get("dot_number"):
@@ -1045,6 +1047,11 @@ async def fetch_carriers(filters: dict) -> dict:
     elif has_company_rep == "false":
         conditions.append("(c.dba_name IS NULL OR c.dba_name = '')")
 
+    # ── CTE+JOIN filters (safety & insurance) ────────────────────────────
+    cte_idx = 0
+    ctes: list[tuple[str, str]] = []
+    joins: list[str] = []
+
     entity_type = filters.get("entity_type")
     if entity_type:
         if entity_type.upper() == "BROKER":
@@ -1053,7 +1060,6 @@ async def fetch_carriers(filters: dict) -> dict:
             # Use CTE+NOT IN instead of NOT ILIKE (2x faster — avoids pattern match on 4.4M rows)
             ctes.append(("_brokers", "SELECT dot_number FROM carriers WHERE classdef ILIKE '%broker%'"))
             conditions.append("c.dot_number NOT IN (SELECT dot_number FROM _brokers)")
-            joins.append("")  # no join needed, just the NOT IN condition
 
     if filters.get("classification"):
         classifications = filters["classification"]
@@ -1099,11 +1105,6 @@ async def fetch_carriers(filters: dict) -> dict:
     idx = _add_range_filter(filters, "power_units", "c.power_units", conditions, params, idx)
     idx = _add_range_filter(filters, "drivers", "c.total_drivers", conditions, params, idx)
 
-    # ── CTE+JOIN filters (safety & insurance) ────────────────────────────
-    cte_idx = 0
-    ctes: list[tuple[str, str]] = []
-    joins: list[str] = []
-
     def add_safety_cte(name, table, having, join_col="dot_number"):
         ctes.append((name, f"SELECT {join_col} FROM {table} GROUP BY {join_col} HAVING {having}"))
         joins.append(f"INNER JOIN {name} ON {name}.{join_col} = c.{join_col}")
@@ -1112,8 +1113,8 @@ async def fetch_carriers(filters: dict) -> dict:
         nonlocal cte_idx
         name = f"_ifd{cte_idx}"
         extra = f" AND {extra_where}" if extra_where else ""
-        ctes.append((name, f"SELECT DISTINCT mc_num FROM insurance_history WHERE mc_num IS NOT NULL AND ({where_body}){extra}"))
-        joins.append(f"INNER JOIN {name} ON {name}.mc_num = c.mc_number")
+        ctes.append((name, f"SELECT DISTINCT dot_number FROM insurance_history WHERE dot_number IS NOT NULL AND ({where_body}){extra}"))
+        joins.append(f"INNER JOIN {name} ON {name}.dot_number = c.dot_number")
         cte_idx += 1
 
     # OOS violations
@@ -1185,7 +1186,7 @@ async def fetch_carriers(filters: dict) -> dict:
         elif val == "0":
             conditions.append(
                 f"NOT EXISTS (SELECT 1 FROM insurance_history ih "
-                f"WHERE ih.mc_num = c.mc_number "
+                f"WHERE ih.dot_number = c.dot_number "
                 f"AND ih.ins_type_desc {op} ${idx} "
                 f"AND ih.cancl_effective_date IS NULL)"
             )
@@ -1390,29 +1391,29 @@ async def fetch_carriers(filters: dict) -> dict:
 
         t2 = _time.monotonic()
 
-        # Batch-fetch insurance history
-        docket_keys = [f"MC{dict(row).get('mc_number')}" if dict(row).get("mc_number") else "" for row in rows]
-        unique_keys = list(set(k for k in docket_keys if k))
-        if unique_keys:
+        # Batch-fetch insurance history by dot_number
+        dot_numbers = [int(dict(row).get("dot_number") or 0) for row in rows]
+        unique_dots = list(set(d for d in dot_numbers if d))
+        if unique_dots:
             try:
                 ih_rows = await pool.fetch(
-                    """SELECT docket_number, ins_type_desc, max_cov_amount,
+                    """SELECT dot_number, docket_number, ins_type_desc, max_cov_amount,
                               underl_lim_amount, policy_no, effective_date,
                               ins_form_code, name_company, trans_date,
                               cancl_effective_date
                        FROM insurance_history
-                       WHERE docket_number = ANY($1::text[])
+                       WHERE dot_number = ANY($1::bigint[])
                        ORDER BY effective_date DESC""",
-                    unique_keys,
+                    unique_dots,
                 )
-                ih_map: dict[str, list[dict]] = {}
+                ih_map: dict[int, list[dict]] = {}
                 for ih_row in ih_rows:
-                    ih_map.setdefault(ih_row["docket_number"], []).append(dict(ih_row))
+                    ih_map.setdefault(ih_row["dot_number"], []).append(dict(ih_row))
                 for i, carrier in enumerate(carrier_dicts):
-                    dk = docket_keys[i]
-                    if dk and dk in ih_map:
+                    dn = dot_numbers[i]
+                    if dn and dn in ih_map:
                         carrier["insurance_history_filings"] = [
-                            _format_insurance_filing(r) for r in ih_map[dk]
+                            _format_insurance_filing(r) for r in ih_map[dn]
                         ]
             except Exception as e:
                 print(f"[DB] Insurance batch-fetch error: {e}")
