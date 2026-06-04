@@ -227,9 +227,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash           TEXT,
     role                    TEXT NOT NULL DEFAULT 'user'
                             CHECK (role IN ('user', 'admin')),
-    plan                    TEXT NOT NULL DEFAULT 'Free'
-                            CHECK (plan IN ('Free', 'Starter', 'Pro', 'Enterprise')),
-    daily_limit             INTEGER NOT NULL DEFAULT 50,
+    plan                    TEXT NOT NULL DEFAULT 'Insurance'
+                            CHECK (plan IN ('Basic', 'Essential', 'Professional', 'Insurance')),
+    daily_limit             INTEGER NOT NULL DEFAULT 100000,
     records_extracted_today INTEGER NOT NULL DEFAULT 0,
     last_active             TEXT DEFAULT 'Never',
     ip_address              TEXT,
@@ -553,6 +553,17 @@ async def connect_db() -> None:
         await conn.execute(_SCHEMA_SQL)
         await conn.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_ips TEXT[] DEFAULT '{}'"
+        )
+        # Migrate legacy plan names (Free/Starter/Pro/Enterprise) to the new tiers.
+        await conn.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_plan_check")
+        await conn.execute("UPDATE users SET plan = 'Basic' WHERE plan = 'Free'")
+        await conn.execute("UPDATE users SET plan = 'Essential' WHERE plan = 'Starter'")
+        await conn.execute("UPDATE users SET plan = 'Professional' WHERE plan = 'Pro'")
+        await conn.execute("UPDATE users SET plan = 'Insurance' WHERE plan = 'Enterprise'")
+        await conn.execute("ALTER TABLE users ALTER COLUMN plan SET DEFAULT 'Insurance'")
+        await conn.execute(
+            "ALTER TABLE users ADD CONSTRAINT users_plan_check "
+            "CHECK (plan IN ('Basic', 'Essential', 'Professional', 'Insurance'))"
         )
 
 
@@ -2306,8 +2317,8 @@ async def create_user(user_data: dict) -> Optional[dict]:
             user_data.get("email", "").lower(),
             user_data.get("password_hash"),
             user_data.get("role", "user"),
-            user_data.get("plan", "Free"),
-            user_data.get("daily_limit", 50),
+            user_data.get("plan", "Insurance"),
+            user_data.get("daily_limit", 100000),
             user_data.get("records_extracted_today", 0),
             user_data.get("last_active", "Never"),
             user_data.get("ip_address"),
