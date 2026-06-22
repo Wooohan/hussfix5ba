@@ -488,6 +488,48 @@ async def api_get_carriers_by_range(
 ):
     data = await get_carriers_by_mc_range(start, end)
     return data
+@app.get("/api/auth/check-status")
+async def api_auth_check_status(request: Request):
+    """Check if the current user is still allowed to use the app.
+    
+    Returns blocked status based on:
+    1. User's is_blocked field in the database
+    2. User's IP being in the blocked_ips table
+    
+    Frontend should poll this every hour to enforce bans on active sessions.
+    """
+    user_payload = getattr(request.state, "user", None)
+    if not user_payload:
+        return JSONResponse(status_code=401, content={"error": "Authentication required"})
+    
+    user_email = user_payload.get("email", "")
+    client_ip = _get_request_ip(request)
+    
+    # Check if user is blocked in the users table
+    user = await fetch_user_by_email(user_email)
+    user_blocked = False
+    if user and user.get("is_blocked"):
+        user_blocked = True
+    
+    # Check if user's IP is blocked
+    ip_blocked = False
+    if client_ip:
+        ip_blocked = await is_ip_blocked(client_ip)
+    
+    is_banned = user_blocked or ip_blocked
+    reason = ""
+    if user_blocked:
+        reason = "Your account has been suspended by an administrator."
+    elif ip_blocked:
+        reason = "Your IP address has been blocked."
+    
+    return {
+        "allowed": not is_banned,
+        "blocked": is_banned,
+        "reason": reason,
+    }
+
+
 @app.post("/api/auth/login")
 async def api_auth_login(request: Request):
     client_ip = _get_request_ip(request)
