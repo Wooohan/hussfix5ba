@@ -2282,7 +2282,33 @@ async def fetch_users() -> list[dict]:
             "records_extracted_today, last_active, ip_address, is_online, "
             "is_blocked, allowed_ips, created_at, updated_at FROM users ORDER BY created_at DESC"
         )
-        return [_user_row_to_dict(row) for row in rows]
+        users = [_user_row_to_dict(row) for row in rows]
+        # Dynamically compute is_online based on last_active timestamp.
+        # If last_active is older than 1 hour, the user is considered offline
+        # (meaning the frontend heartbeat hasn't pinged in over an hour).
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        one_hour_ago = now - datetime.timedelta(hours=1)
+        for user in users:
+            last_active = user.get("last_active")
+            if not last_active or last_active in ("Never", "Now"):
+                if last_active == "Now":
+                    user["is_online"] = True
+                else:
+                    user["is_online"] = False
+                continue
+            try:
+                # Parse ISO format timestamp
+                la_str = last_active
+                if la_str.endswith("Z"):
+                    la_str = la_str[:-1] + "+00:00"
+                la_dt = datetime.datetime.fromisoformat(la_str)
+                if la_dt.tzinfo is None:
+                    la_dt = la_dt.replace(tzinfo=datetime.timezone.utc)
+                user["is_online"] = la_dt > one_hour_ago
+            except (ValueError, TypeError):
+                user["is_online"] = False
+        return users
     except Exception as e:
         print(f"[DB] Error fetching users: {e}")
         return []
