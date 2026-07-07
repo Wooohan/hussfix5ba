@@ -497,13 +497,25 @@ async def api_auth_check_status(request: Request):
     2. User's IP being in the blocked_ips table
     
     Frontend should poll this every hour to enforce bans on active sessions.
+    This also acts as a heartbeat — updates last_active and is_online for the user.
     """
     user_payload = getattr(request.state, "user", None)
     if not user_payload:
         return JSONResponse(status_code=401, content={"error": "Authentication required"})
     
     user_email = user_payload.get("email", "")
+    user_id = user_payload.get("sub", "")
     client_ip = _get_request_ip(request)
+    
+    # Update last_active timestamp and mark user as online (heartbeat)
+    if user_id:
+        import datetime
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        await update_user(user_id, {
+            "last_active": now_iso,
+            "is_online": True,
+            "ip_address": client_ip or "",
+        })
     
     # Check if user is blocked in the users table
     user = await fetch_user_by_email(user_email)
@@ -558,6 +570,15 @@ async def api_auth_login(request: Request):
             status_code=403,
             content={"error": "Login not allowed from this IP address. Contact your administrator."},
         )
+    # Update last_active and is_online on login
+    import datetime as _dt_login
+    login_now = _dt_login.datetime.now(_dt_login.timezone.utc).isoformat()
+    await update_user(user["user_id"], {
+        "last_active": login_now,
+        "is_online": True,
+        "ip_address": client_ip or user.get("ip_address", ""),
+    })
+
     token = create_token(
         user_id=user["user_id"],
         email=user["email"],
@@ -573,9 +594,9 @@ async def api_auth_login(request: Request):
             "plan": user["plan"],
             "daily_limit": user["daily_limit"],
             "records_extracted_today": user["records_extracted_today"],
-            "last_active": user.get("last_active", "Never"),
-            "ip_address": user.get("ip_address", ""),
-            "is_online": user.get("is_online", False),
+            "last_active": login_now,
+            "ip_address": client_ip or user.get("ip_address", ""),
+            "is_online": True,
             "is_blocked": user.get("is_blocked", False),
             "allowed_ips": user.get("allowed_ips", []),
         },
